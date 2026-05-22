@@ -1,26 +1,37 @@
-import React, { useEffect, useState } from 'react';
+import * as React from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import {
   View,
   Text,
   FlatList,
   Image,
   TouchableOpacity,
-  StyleSheet,
-  ActivityIndicator,
   RefreshControl,
-  SafeAreaView,
   TextInput,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { styles } from './RestaurantListScreen.styles';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../lib/supabase';
 import { Restaurant, MenuItem } from '../lib/supabase';
 import { Ionicons } from '@expo/vector-icons';
-import { useCart } from '../hooks/useCart';
-import { searchRestaurants, searchMenuItems } from '../lib/supabase';
-import { useNavigation } from '@react-navigation/native';
+import { useCart, getCartItemKey } from '../hooks/useCart';
+import { useTranslation } from 'react-i18next';
+import { Colors as BrandColors } from '../constants/Colors';
+import { LinearGradient } from 'expo-linear-gradient';
+import Preloader, { RestaurantCardSkeleton, PulseDotsLoader } from "../components/Preloader";
+import QuantitySelector from '../components/QuantitySelector';
+import { searchRestaurants, searchMenuItems, getRestaurants } from '../lib/supabase';
+
+import { useNavigation, useRoute, useFocusEffect, RouteProp } from '@react-navigation/native';
+import { BackHandler } from 'react-native';
 // Import the custom location hook
 import { useLocation } from '../hooks/useLocation';
 // Import the getDistance utility
 import { getDistance } from '../utils/geo';
+import { formatPrice } from '../utils/currency';
+import { useSettings } from '../hooks/useSettings';
+import { resolveDeliveryCharge } from '../utils/delivery';
 
 function useDebounce<T>(value: T, delay: number): T {
   const [debouncedValue, setDebouncedValue] = useState(value);
@@ -31,17 +42,90 @@ function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue;
 }
 
+export type RestaurantsScreenParams = {
+  fromCheckout?: boolean;
+  checkoutParams?: {
+    deliveryAddress: any;
+    restaurantId?: string;
+  };
+};
+
+type RestaurantsRouteProp = RouteProp<
+  { Restaurants: RestaurantsScreenParams },
+  'Restaurants'
+>;
+
 export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
+  const { t } = useTranslation();
+  const route = useRoute<RestaurantsRouteProp>();
   // Store the full fetched list separately
   const [allRestaurants, setAllRestaurants] = useState<Restaurant[]>([]);
   // 'restaurants' state holds the nearby (filtered) restaurants
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { cartItems, addToCart, removeFromCart } = useCart();
   const [searchTerm, setSearchTerm] = useState('');
+  const insets = useSafeAreaInsets();
   const debouncedSearchTerm = useDebounce(searchTerm, 500);
+  const { deliveryRadius } = useSettings();
+
+  const [favorites, setFavorites] = useState<Record<string, boolean>>({});
+
+  const handleBackPress = useCallback(() => {
+    const { fromCheckout, checkoutParams } = route.params ?? {};
+    if (fromCheckout && checkoutParams) {
+      navigation.navigate('CartTab', {
+        screen: 'CheckoutScreen',
+        params: checkoutParams,
+      });
+      return true;
+    }
+    navigation.goBack();
+    return true;
+  }, [navigation, route.params]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!route.params?.fromCheckout) return undefined;
+      const subscription = BackHandler.addEventListener(
+        'hardwareBackPress',
+        handleBackPress
+      );
+      return () => subscription.remove();
+    }, [route.params?.fromCheckout, handleBackPress])
+  );
+
+  const toggleFavorite = async (id: string) => {
+    setFavorites(prev => {
+      const newFavs = { ...prev };
+      if (newFavs[id]) {
+        delete newFavs[id];
+      } else {
+        newFavs[id] = true;
+      }
+      AsyncStorage.setItem('user_favorites', JSON.stringify(newFavs)).catch(err => {
+        console.error('Failed to save favorites', err);
+      });
+      return newFavs;
+    });
+  };
+
+  useEffect(() => {
+    const loadFavorites = async () => {
+      try {
+        const storedFavs = await AsyncStorage.getItem('user_favorites');
+        if (storedFavs) {
+          setFavorites(JSON.parse(storedFavs));
+        }
+      } catch (e) {
+        console.error('Failed to load favorites', e);
+      }
+    };
+    loadFavorites();
+  }, []);
 
   // --- Location & Default Address State ---
   const { currentLocation, fetchLocation, coords } = useLocation();
@@ -50,10 +134,13 @@ export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
   const effectiveCoords = coords || defaultAddressCoords;
   //---------------------------------------------
 
-  // Fetch current location on mount.
+  // Fetch current location on mount if not already available.
   useEffect(() => {
-    fetchLocation();
-  }, [fetchLocation]);
+    if (!coords && !defaultAddressCoords) {
+      fetchLocation();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Run check on mount
 
   // Fetch the user's default address coordinates (if any).
   useEffect(() => {
@@ -71,13 +158,14 @@ export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
       .select('latitude, longitude')
       .eq('userId', userId)
       .eq('isDefault', true)
-      .maybeSingle();
+      .limit(1);
     if (error) {
       console.error('Error fetching default address:', error.message);
       return;
     }
-    if (data && data.latitude && data.longitude) {
-      setDefaultAddressCoords({ latitude: data.latitude, longitude: data.longitude });
+    const address = data?.[0];
+    if (address && address.latitude && address.longitude) {
+      setDefaultAddressCoords({ latitude: address.latitude, longitude: address.longitude });
     }
   };
   //-----------------------------------------
@@ -86,18 +174,21 @@ export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
   const fetchRestaurants = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('Restaurant')
-        .select(`*, MenuItem (*)`)
-        .order('rating', { ascending: false });
-      if (error) {
-        setError('Error fetching restaurants: ' + error.message);
+      const data = await getRestaurants();
+      if (data === null) {
+        setError(t('restaurants.load_error'));
         return;
       }
-      setAllRestaurants(data || []);
+
+      console.log(`[RestaurantList] Fetched ${data?.length || 0} total restaurants.`);
+      const restaurantsData = data || [];
+      setAllRestaurants(restaurantsData);
+      // Set initial restaurants to prevent flicker while useEffect calculates nearby ones
+      setRestaurants(restaurantsData.slice(0, 10)); 
+
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : 'Unknown error occurred';
-      setError('Unexpected error: ' + errMsg);
+
+      setError(t('restaurants.load_error'));
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -109,33 +200,63 @@ export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
     fetchRestaurants();
   }, []);
 
-  // Whenever effectiveCoords or the full list changes, filter restaurants by distance.
+  // Whenever effectiveCoords or the full list changes, calculate distances but show all stores.
   useEffect(() => {
-    if (effectiveCoords && allRestaurants.length > 0) {
-      const filtered = allRestaurants.filter((restaurant: Restaurant) => {
+    if (allRestaurants.length === 0) return;
+    // ONLY run this default filtering if there is no active search term.
+    if (debouncedSearchTerm.trim()) return;
+
+    const radius = Number(deliveryRadius) || 50; 
+    const nearby = allRestaurants.filter((restaurant: Restaurant) => {
+      if (!restaurant.latitude || !restaurant.longitude || !effectiveCoords) {
+        return false; 
+      }
+      try {
         const distance = getDistance(
           effectiveCoords.latitude,
           effectiveCoords.longitude,
           restaurant.latitude,
           restaurant.longitude
         );
-        return distance <= 10; // Only include restaurants within 10 km
-      });
-      setRestaurants(filtered);
+        return distance <= radius;
+      } catch (error) {
+        console.error('Error calculating distance:', error);
+        return false;
+      }
+    });
+
+    if (nearby.length === 0) {
+      setRestaurants(allRestaurants.slice(0, 10));
     } else {
-      // If no effective coordinates, show no restaurants.
-      setRestaurants([]);
+      setRestaurants(nearby);
     }
-  }, [effectiveCoords, allRestaurants]);
+  }, [effectiveCoords, allRestaurants, deliveryRadius, debouncedSearchTerm]);
 
   // Perform search and then filter search results by distance.
   const performSearch = async (term: string) => {
     setLoading(true);
     try {
-      const [restaurantResults, menuItemResults] = await Promise.all([
+      // Check if we have valid coordinates before searching
+      if (!effectiveCoords || !effectiveCoords.latitude || !effectiveCoords.longitude) {
+        setError(t('restaurants.location_required'));
+        setLoading(false);
+        return;
+      }
+
+      let [restaurantResults, menuItemResults] = await Promise.all([
         searchRestaurants(term, effectiveCoords.latitude, effectiveCoords.longitude),
         searchMenuItems(term, effectiveCoords.latitude, effectiveCoords.longitude),
       ]);
+
+      // FALLBACK: Global search if local search is empty
+      if (restaurantResults.length === 0 && menuItemResults.length === 0) {
+        const [globalRes, globalItems] = await Promise.all([
+          searchRestaurants(term, effectiveCoords.latitude, effectiveCoords.longitude, 99999),
+          searchMenuItems(term, effectiveCoords.latitude, effectiveCoords.longitude, 99999),
+        ]);
+        restaurantResults = globalRes;
+        menuItemResults = globalItems;
+      }
       const restaurantIdsFromName = restaurantResults.map(r => r.id);
       const restaurantIdsFromMenu = menuItemResults.map(mi => mi.restaurantId);
       const allRestaurantIds = Array.from(new Set([...restaurantIdsFromName, ...restaurantIdsFromMenu]));
@@ -148,22 +269,45 @@ export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
 
       const { data, error } = await supabase
         .from('Restaurant')
-        .select('*, MenuItem(*)')
+        .select(`
+          id,
+          name,
+          chainName,
+          address,
+          latitude,
+          longitude,
+          cuisineType,
+          segment,
+          city,
+          area,
+          rating,
+          coverImage,
+          deliveryTime,
+          minimumOrder,
+          deliveryCharges,
+          currency,
+          MenuItem (id, label, price, image, description, category)
+        `)
+
+
         .in('id', allRestaurantIds)
         .order('rating', { ascending: false });
       if (error) throw error;
 
-      let processedRestaurants = data.map((restaurant: Restaurant) => {
+      let processedRestaurants = data.map((restaurant: any) => {
         if (restaurantIdsFromName.includes(restaurant.id)) {
           return restaurant;
         } else {
-          const filteredMenuItems = restaurant.MenuItem.filter((item: MenuItem) =>
+          const menuItems = restaurant.MenuItem || restaurant.menuItems || [];
+          const filteredMenuItems = menuItems.filter((item: MenuItem) =>
             item.label.toLowerCase().includes(term.toLowerCase())
           );
           return { ...restaurant, MenuItem: filteredMenuItems };
         }
       });
 
+      // RESTORED: Filter search results by location radius.
+      const radius = Number(deliveryRadius) || 50;
       if (effectiveCoords) {
         processedRestaurants = processedRestaurants.filter((restaurant: Restaurant) => {
           const distance = getDistance(
@@ -172,12 +316,12 @@ export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
             restaurant.latitude,
             restaurant.longitude
           );
-          return distance <= 10;
+          return distance <= radius;
         });
       }
       setRestaurants(processedRestaurants);
     } catch (error) {
-      setError(error instanceof Error ? error.message : 'Search failed.');
+      setError(t('restaurants.search_error'));
     } finally {
       setLoading(false);
     }
@@ -194,435 +338,333 @@ export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
 
   const onRefresh = () => {
     setRefreshing(true);
-    fetchRestaurants();
+    if (debouncedSearchTerm.trim()) {
+      performSearch(debouncedSearchTerm.trim());
+    } else {
+      fetchRestaurants();
+    }
   };
 
   const handleMenuItemPress = (restaurant: Restaurant, menuItem: MenuItem) => {
+    const fallbackDeliveryFee = Number(t('common.delivery_fee_default'));
     addToCart({
       id: menuItem.id,
       restaurantId: restaurant.id,
+      restaurantCurrency: restaurant.currency,
       name: menuItem.label,
       price: menuItem.price,
       quantity: 1,
       restaurantName: restaurant.name,
+      image: menuItem.image,
+      deliveryCharges: resolveDeliveryCharge(restaurant, fallbackDeliveryFee),
     });
   };
 
-  const renderMenuItem = (restaurant: Restaurant, menuItem: MenuItem) => {
-    const itemInCart = cartItems.find(item => item.id === menuItem.id);
+  const renderRestaurantItem = ({ item }: { item: Restaurant }) => {
+    // 1. Fetch delivery charges and currency
+    const deliveryChargesVal = item.deliveryCharges !== undefined && item.deliveryCharges !== null 
+      ? item.deliveryCharges 
+      : (item as any).delivery_charges;
+    const currency = item.currency || 'Rs.';
+
     return (
-      <View style={styles.menuItem} key={menuItem.id}>
-        <Image 
-          source={{ uri: menuItem.image }} 
-          style={styles.menuItemImage}
-          defaultSource={require('../../assets/placeholder.png')}
-        />
-        <View style={styles.menuItemInfo}>
-          <Text style={styles.menuItemName}>{menuItem.label}</Text>
-          <Text style={styles.menuItemDescription}>{menuItem.description}</Text>
-          <Text style={styles.menuItemPrice}>${menuItem.price.toFixed(2)}</Text>
+      <TouchableOpacity 
+        style={styles.restaurantCard}
+        onPress={() => navigation.navigate("RestaurantDetails", { restaurant: item })}
+        activeOpacity={0.9}
+      >
+        <View style={styles.imageWrapper}>
+          <Image
+            source={{ uri: item.coverImage || (item as any).cover_image || '' }}
+            style={styles.restaurantImage}
+          />
+          {/* Floating Delivery Time Badge */}
+          <View style={styles.timeBadge}>
+            <Text style={styles.timeBadgeText}>
+              {item.deliveryTime ? `${item.deliveryTime} min` : '30-40 min'}
+            </Text>
+          </View>
+          {/* Overlapping Brand Logo */}
+          <View style={styles.logoWrapper}>
+            {item.logo || (item as any).logo ? (
+              <Image
+                source={{ uri: item.logo || (item as any).logo || '' }}
+                style={styles.logoImage}
+                resizeMode="cover"
+              />
+            ) : (
+              <Ionicons name="storefront" size={22} color="#EA580C" />
+            )}
+          </View>
         </View>
-        <View style={styles.menuItemActions}>
-          {itemInCart ? (
-            <View style={styles.quantityControl}>
-              <TouchableOpacity 
-                onPress={() => removeFromCart(menuItem.id)}
-                style={styles.quantityButton}
-              >
-                <Ionicons name="remove" size={20} color="#FF4B2B" />
-              </TouchableOpacity>
-              <Text style={styles.quantityText}>{itemInCart.quantity}</Text>
-              <TouchableOpacity 
-                onPress={() => handleMenuItemPress(restaurant, menuItem)}
-                style={styles.quantityButton}
-              >
-                <Ionicons name="add" size={20} color="#FF4B2B" />
-              </TouchableOpacity>
+
+        <View style={styles.restaurantInfo}>
+          {/* Name Row */}
+          <View style={styles.nameRow}>
+            <Text style={styles.restaurantName} numberOfLines={1} ellipsizeMode="tail">
+              {item.name}
+            </Text>
+          </View>
+
+          {/* Cuisines Row */}
+          <Text style={styles.cuisineRow} numberOfLines={1} ellipsizeMode="tail">
+            {item.cuisineType ? item.cuisineType : 'Pizza • Fast Food • Italian'}
+          </Text>
+
+          {/* Rating Row */}
+          <View style={styles.ratingRow}>
+            <Ionicons name="star" size={15} color="#FFC107" style={{ marginRight: 4 }} />
+            <Text style={styles.ratingText}>
+              {item.rating ? Number(item.rating).toFixed(1) : '5.0'}{' '}
+              <Text style={styles.ratingCount}>({(item as any).reviewsCount || '100+'})</Text>
+            </Text>
+          </View>
+
+          {/* Divider */}
+          <View style={styles.divider} />
+
+          {/* Footer Row */}
+          <View style={styles.footerRow}>
+            <View style={styles.deliveryDetails}>
+              <Ionicons 
+                name="bicycle" 
+                size={18} 
+                color={item.storeType === 'GROCERY' ? '#10B981' : '#EA580C'} 
+              />
+              <Text style={styles.deliveryDetailsText}>
+                {deliveryChargesVal === 0 
+                  ? `Free Delivery  •  ${item.deliveryTime || '30-40'} min` 
+                  : `${currency} ${deliveryChargesVal}  •  ${item.deliveryTime || '30-40'} min`}
+              </Text>
             </View>
-          ) : (
-            <TouchableOpacity 
-              onPress={() => handleMenuItemPress(restaurant, menuItem)}
-              style={styles.addButton}
+
+            {/* Favorite Button */}
+            <TouchableOpacity
+              style={styles.favoriteButton}
+              onPress={(e) => {
+                e.stopPropagation();
+                toggleFavorite(item.id);
+              }}
+              activeOpacity={0.8}
             >
-              <Text style={styles.addButtonText}>Add</Text>
+              <Ionicons
+                name={favorites[item.id] ? 'heart' : 'heart-outline'}
+                size={20}
+                color={favorites[item.id] ? '#EF4444' : '#EA580C'}
+              />
             </TouchableOpacity>
-          )}
+          </View>
         </View>
-      </View>
+      </TouchableOpacity>
     );
   };
-
-  const renderRestaurantItem = ({ item }: { item: Restaurant }) => (
-    <View style={styles.restaurantCard}>
-      <Image
-        source={{ uri: item.coverImage }}
-        style={styles.restaurantImage}
-      />
-      <View style={styles.restaurantInfo}>
-        <Text style={styles.restaurantName}>{item.name}</Text>
-        <Text style={styles.cuisineType}>
-          {item.chainName} • {item.cuisineType}
-        </Text>
-        <View style={styles.restaurantMeta}>
-          <Text style={styles.metaText}>⭐ {item.rating}</Text>
-          <Text style={styles.metaText}>🕒 {item.deliveryTime}</Text>
-          <Text style={styles.metaText}>💰 {item.minimumOrder}</Text>
-        </View>
-        <Text style={styles.address}>{item.address}</Text>
-      </View>
-      <View style={styles.menuItemsContainer}>
-        <Text style={styles.menuTitle}>Menu</Text>
-        {item.MenuItem?.map((menuItem: MenuItem) => renderMenuItem(item, menuItem))}
-      </View>
-    </View>
-  );
   if (error) {
     return (
       <View style={styles.errorContainer}>
-        <Text style={styles.errorText}>Error: {error}</Text>
-        <TouchableOpacity 
-          style={styles.retryButton} 
+        <Text style={styles.errorText}>{error}</Text>
+        <TouchableOpacity
+          style={styles.retryButton}
           onPress={() => {
             setError(null);
             setLoading(true);
             fetchRestaurants();
           }}
+          activeOpacity={1}
         >
-          <Text style={styles.retryButtonText}>Retry</Text>
+          <Text style={styles.retryButtonText}>{t('common.retry')}</Text>
         </TouchableOpacity>
       </View>
     );
   }
 
   return (
-<SafeAreaView style={styles.container}>
-  <FlatList
-    data={restaurants}
-    renderItem={renderRestaurantItem}
-    keyExtractor={(item) => item.id.toString()}
-    contentContainerStyle={styles.listContainer}
-    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-    ListHeaderComponent={
-      <>
-        <View style={styles.searchContainer}>
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Search restaurants or menu items..."
-            placeholderTextColor="#999"
-            value={searchTerm}
-            onChangeText={setSearchTerm}
-            autoFocus={true}
-          />
+    <View style={styles.container}>
+      {/* Custom Premium Header */}
+      <View style={[styles.customHeader, { paddingTop: insets.top + 8, paddingBottom: 8 }]}>
+        <View style={styles.headerLeft}>
+          <TouchableOpacity 
+            style={styles.backButtonCircle} 
+            onPress={handleBackPress}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="arrow-back" size={20} color="#EA580C" />
+          </TouchableOpacity>
         </View>
-        {loading && !refreshing && (
-          <ActivityIndicator size="large" color="#FF4B2B" style={styles.fullLoading} />
-        )}
-      </>
-    }
-    keyboardShouldPersistTaps="handled"
-  />
+        <View style={styles.headerTitleContainer}>
+          <Text style={styles.headerTitleText}>Stores</Text>
+        </View>
+        <View style={styles.headerRight} />
+      </View>
 
-{cartItems.length > 0 && (
+      <FlatList
+        data={restaurants}
+        renderItem={renderRestaurantItem}
+        keyExtractor={(item) => item.id.toString()}
+        contentContainerStyle={[styles.listContainer, { paddingBottom: insets.bottom + 80 }]}
+        refreshControl={
+          <RefreshControl 
+            refreshing={refreshing} 
+            onRefresh={onRefresh} 
+            colors={[BrandColors.primary]}
+            tintColor={BrandColors.primary}
+          />
+        }
+        ListHeaderComponent={
+          <>
+            <View style={styles.searchContainer}>
+              <View style={styles.searchWrapper}>
+                <Ionicons name="search" size={20} color="#EA580C" style={styles.searchIcon} />
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder={t('restaurants.search_placeholder')}
+                  placeholderTextColor="#94A3B8"
+                  value={searchTerm}
+                  onChangeText={setSearchTerm}
+                  autoFocus={false}
+                  underlineColorAndroid="transparent"
+                  multiline={false}
+                  numberOfLines={1}
+                />
+                {loading && searchTerm.length > 0 && (
+                  <View style={styles.searchLoading}>
+                    <PulseDotsLoader size={6} />
+                  </View>
+                )}
+                {searchTerm.length > 0 && !loading && (
+                  <TouchableOpacity 
+                    onPress={() => setSearchTerm('')}
+                    style={styles.clearIcon}
+                  >
+                    <Ionicons name="close-circle" size={20} color="#94A3B8" />
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+
+            {searchTerm.length === 0 && (
+              <View style={styles.bannerContainer}>
+                <LinearGradient
+                  colors={['#FFF7ED', '#FFEDD5']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.bannerGradient}
+                >
+                  <View style={styles.bannerTextContainer}>
+                    <View style={styles.bannerBadge}>
+                      <Text style={styles.bannerBadgeText}>Limited Time</Text>
+                    </View>
+                    <Text style={styles.bannerTitle}>50% OFF</Text>
+                    <Text style={styles.bannerSubtitle}>On Your First Order</Text>
+                    <TouchableOpacity style={styles.bannerButton} activeOpacity={0.9}>
+                      <Text style={styles.bannerButtonText}>Order Now</Text>
+                      <Ionicons name="arrow-forward" size={14} color="#FFFFFF" />
+                    </TouchableOpacity>
+                  </View>
+                  <View style={styles.bannerImageContainer}>
+                    <Image 
+                      source={{ uri: 'https://cdn-icons-png.flaticon.com/512/1404/1404945.png' }}
+                      style={styles.bannerImage}
+                      resizeMode="contain"
+                    />
+                  </View>
+                </LinearGradient>
+                
+                {/* Dots Pager */}
+                <View style={styles.dotsContainer}>
+                  <View style={styles.activeDot} />
+                  <View style={styles.dot} />
+                  <View style={styles.dot} />
+                  <View style={styles.dot} />
+                </View>
+              </View>
+            )}
+
+            {loading && !refreshing && searchTerm.length === 0 && (
+              <View style={{ padding: 16 }}>
+                <RestaurantCardSkeleton />
+                <RestaurantCardSkeleton />
+                <RestaurantCardSkeleton />
+              </View>
+            )}
+          </>
+        }
+        keyboardShouldPersistTaps="handled"
+        ListEmptyComponent={
+          !loading && !refreshing ? (
+            <View style={styles.noResultsContainer}>
+              {!effectiveCoords ? (
+                <>
+                  <View style={styles.noResultsIconContainer}>
+                    <Ionicons name="location-outline" size={64} color="#E5E7EB" />
+                    <View style={styles.noResultsIconOverlay}>
+                      <Ionicons name="alert" size={24} color={BrandColors.primary} />
+                    </View>
+                  </View>
+                  <Text style={styles.noResultsTitle}>{t('restaurants.location_required')}</Text>
+                  <Text style={styles.noResultsSubtitle}>{t('restaurants.location_required_subtitle')}</Text>
+                  <TouchableOpacity 
+                    style={styles.grantPermissionButton} 
+                    onPress={() => fetchLocation(true)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.grantPermissionText}>{t('restaurants.grant_permission')}</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  <View style={styles.noResultsIconContainer}>
+                    <Ionicons name="search-outline" size={64} color="#E5E7EB" />
+                    <View style={styles.noResultsIconOverlay}>
+                      <Ionicons name="close" size={24} color={BrandColors.primary} />
+                    </View>
+                  </View>
+                  <Text style={styles.noResultsTitle}>
+                    {searchTerm.trim() ? t('search.no_results_found') : t('restaurants.no_results')}
+                  </Text>
+                  <Text style={styles.noResultsSubtitle}>
+                    {searchTerm.trim() 
+                      ? t('search.no_results_subtitle') 
+                      : t('restaurants.no_results_subtitle')}
+                  </Text>
+                  {searchTerm.trim() && (
+                    <TouchableOpacity 
+                      style={styles.clearFiltersButton} 
+                      onPress={() => setSearchTerm('')}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.clearFiltersText}>{t('search.clear_all')}</Text>
+                    </TouchableOpacity>
+                  )}
+                </>
+              )}
+            </View>
+          ) : null
+        }
+      />
+
+      {cartItems.length > 0 && (
         <TouchableOpacity
-          style={styles.viewCartButton}
-          onPress={() => navigation.navigate('Cart')}
+          style={[styles.viewCartButton, { bottom: 12 }]}
+          onPress={() => navigation.navigate('CartTab')}
+          activeOpacity={0.8}
         >
           <View style={styles.cartInfo}>
             <Ionicons name="cart" size={24} color="#fff" />
             <Text style={styles.cartCount}>
-              {cartItems.reduce((sum, item) => sum + item.quantity, 0)} items
+              {cartItems.reduce((sum, item) => sum + item.quantity, 0)} {t('restaurants.items_count')}
             </Text>
           </View>
           <Text style={styles.cartTotal}>
-            ${cartItems.reduce((sum, item) => sum + (item.price * item.quantity), 0).toFixed(2)}
+            {(() => {
+              const total = cartItems.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+              const currency = cartItems.length > 0 ? cartItems[0].restaurantCurrency : undefined;
+              return formatPrice(total, currency);
+            })()}
           </Text>
         </TouchableOpacity>
       )}
-    </SafeAreaView>
-
+    </View>
   );
 };
-
-
-
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-  },
-  cartTotal: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  cartCount: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginLeft: 8,
-  },
-  viewCartButton: {
-    position: 'absolute',
-    bottom: 20,
-    left: 20,
-    right: 20,
-    backgroundColor: '#FF4B2B',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-    borderRadius: 12,
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    cartInfo: {
-      flexDirection: 'row',
-      alignItems: 'center',
-    },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    elevation: 5,
-  },
-  cartInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  searchContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 2,
-    paddingBottom:20,
-     color: '#000'
-  },
-  searchInput: {
-    flex: 1,
-    backgroundColor: "#F3F4F6",
-    borderRadius: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    fontSize: 16,
-
-  },
-  // loadingContainer: {
-  //   flex: 1,
-  //   justifyContent: 'center',
-  //   alignItems: 'center',
-  // },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 16,
-    color: '#666',
-  },
-  errorContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  errorText: {
-    fontSize: 16,
-    color: '#FF4B2B',
-    textAlign: 'center',
-    marginBottom: 20,
-  },
-  retryButton: {
-    backgroundColor: '#FF4B2B',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 8,
-  },
-  retryButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  listContainer: {
-    padding: 16,
-  },
-
-  searchLoading: {
-    marginLeft: 8,
-  },
-  fullLoading: {
-    marginVertical: 20,
-  },
-  restaurantCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  restaurantImage: {
-    width: '100%',
-    height: 200,
-    borderTopLeftRadius: 12,
-    borderTopRightRadius: 12,
-    backgroundColor: '#F3F4F6',
-  },
-  restaurantInfo: {
-    padding: 16,
-  },
-  restaurantName: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#1F2937',
-    marginBottom: 4,
-  },
-  cuisineType: {
-    fontSize: 14,
-    color: '#6B7280',
-    marginBottom: 8,
-  },
-  restaurantMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginBottom: 8,
-  },
-  metaText: {
-    fontSize: 14,
-    color: '#4B5563',
-  },
-  address: {
-    fontSize: 14,
-    color: '#6B7280',
-    fontStyle: 'italic',
-  },
-  menuItemsContainer: {
-    padding: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#E5E7EB',
-  },
-  menuTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#1F2937',
-    marginBottom: 12,
-  },
-  menuItem: {
-    flexDirection: 'row',
-    marginBottom: 16,
-    backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 2,
-  },
-  menuItemImage: {
-    width: 80,
-    height: 80,
-    borderRadius: 8,
-    backgroundColor: '#F3F4F6',
-  },
-  menuItemInfo: {
-    flex: 1,
-    marginLeft: 12,
-    justifyContent: 'center',
-  },
-  menuItemName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1F2937',
-    marginBottom: 4,
-  },
-  menuItemDescription: {
-    fontSize: 14,
-    color: '#6B7280',
-    marginBottom: 4,
-  },
-  menuItemPrice: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#FF4B2B',
-  },
-  menuItemActions: {
-    justifyContent: 'center',
-    paddingLeft: 12,
-  },
-  addButton: {
-    backgroundColor: '#FF4B2B',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 6,
-  },
-  addButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  quantityControl: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F3F4F6',
-    borderRadius: 6,
-    overflow: 'hidden',
-  },
-  quantityButton: {
-    padding: 8,
-  },
-  quantityText: {
-    paddingHorizontal: 12,
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1F2937',
-  },
-  cartButton: {
-    position: 'absolute',
-    bottom: 20,
-    left: 20,
-    right: 20,
-    backgroundColor: '#FF4B2B',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-    borderRadius: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    elevation: 5,
-  },
-  cartButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginLeft: 8,
-  },
-  cartButtonPrice: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  categoryItem: {
-    width: 100,
-    height: 100,
-    borderRadius: 16,
-    marginRight: 16,
-    overflow: 'hidden',
-  },
-  categoryIcon: {
-    width: '100%',
-    height: '100%',
-  },
-  categoryName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#1F2937',
-    textAlign: 'center',
-    marginTop: 4,
-  },
-});
 
 export default RestaurantListScreen;

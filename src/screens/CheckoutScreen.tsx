@@ -1,22 +1,36 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState, useLayoutEffect, useCallback } from 'react';
 import {
   View,
   Text,
   ScrollView,
-  StyleSheet,
   TouchableOpacity,
   Alert,
   ActivityIndicator,
   Image,
+  TextInput,
 } from 'react-native';
-import { useNavigation, RouteProp, useRoute } from '@react-navigation/native';
+import { styles } from './CheckoutScreen.styles';
+import { useNavigation, RouteProp, useRoute, useFocusEffect } from '@react-navigation/native';
+import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
-import { supabase } from '../lib/supabase';
-import { useCart } from '../hooks/useCart';
+import { MapPin, ShoppingBag, Phone, Gift, Receipt, CreditCard } from 'lucide-react-native';
+import MapView from 'react-native-maps';
+import { supabase, getRestaurantById } from '../lib/supabase';
+import { useCart, calculateItemSubtotal, getCartItemKey } from '../hooks/useCart';
 import cuid from 'cuid';
 import { LinearGradient } from 'expo-linear-gradient';
+import { formatPrice } from '../utils/currency';
+import { useTranslation } from 'react-i18next';
+import { Colors as BrandColors } from '../constants/Colors';
+import { DeliveryTimingCard } from '../components/Checkout/DeliveryTimingCard';
+import { createOrder } from '../lib/api';
+import { OrderSuccessModal } from '../components/Checkout/OrderSuccessModal';
+import { resolveDeliveryCharge } from '../utils/delivery';
+import Preloader from '../components/Preloader';
+import QuantitySelector from '../components/QuantitySelector';
 
 // Use the same naming convention as in CartScreen
 type Address = {
@@ -32,33 +46,169 @@ type Address = {
 type RootStackParamList = {
   Orders: undefined;
   CheckoutScreen: {
-    deliveryAddress: Address;
+    deliveryAddress: any;
+    restaurantId?: string;
   };
+  MainTabs: undefined;
 };
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'CheckoutScreen'>;
 type CheckoutScreenRouteProp = RouteProp<RootStackParamList, 'CheckoutScreen'>;
 
 export function CheckoutScreen() {
+  const { t } = useTranslation();
   const navigation = useNavigation<NavigationProp>();
   const route = useRoute<CheckoutScreenRouteProp>();
   const { deliveryAddress } = route.params;
+
+  console.log("CheckoutScreen mounted");
+  console.log("Received deliveryAddress:", deliveryAddress);
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerShown: false,
+    });
+  }, [navigation]);
+
+  const { cartItems, clearCart, clearRestaurantCart, getTotal, addToCart, removeFromCart } = useCart();
+  const activeRestaurantId = route.params.restaurantId;
+  const fallbackDeliveryFee = Number(t('common.delivery_fee_default'));
   
-  const { cartItems, clearCart, getTotal } = useCart();
-  const total = getTotal();
-  const deliveryFee = 2.99;
-  const finalTotal = total + deliveryFee;
+  // Filter items for the target restaurant
+  const filteredItems = activeRestaurantId 
+    ? cartItems.filter(item => item.restaurantId === activeRestaurantId)
+    : cartItems;
+
+  console.log("Cart items in CheckoutScreen:", cartItems.length, "Filtered items:", filteredItems.length);
+  
+  // Recalculate totals for the filtered items
+  const subtotal = filteredItems.reduce((acc, item) => 
+    acc + calculateItemSubtotal(item.price, item.quantity, item.selectedOptions), 0);
+    
+  const [verifiedDeliveryFee, setVerifiedDeliveryFee] = useState<number | null>(null);
+  const [fullRestaurant, setFullRestaurant] = useState<any>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    const verifyRestaurantData = async () => {
+      const restaurantIdToCheck = activeRestaurantId || filteredItems[0]?.restaurantId;
+      if (!restaurantIdToCheck) {
+        if (isMounted) {
+          setVerifiedDeliveryFee(null);
+          setFullRestaurant(null);
+        }
+        return;
+      }
+      try {
+        console.log(`[CheckoutScreen] Verifying restaurant data for ${restaurantIdToCheck}...`);
+        const restaurant = await getRestaurantById(restaurantIdToCheck);
+        if (isMounted) {
+          setFullRestaurant(restaurant);
+          const fee = resolveDeliveryCharge(restaurant, fallbackDeliveryFee);
+          setVerifiedDeliveryFee(fee);
+          console.log(`[CheckoutScreen] Data verified. acceptsScheduledOrders: ${restaurant?.acceptsScheduledOrders}`);
+        }
+      } catch (error) {
+        console.error("[CheckoutScreen] Failed to verify restaurant data:", error);
+        if (isMounted) {
+          setVerifiedDeliveryFee(null);
+          setFullRestaurant(null);
+        }
+      }
+    };
+    verifyRestaurantData();
+    return () => {
+      isMounted = false;
+    };
+  }, [activeRestaurantId, filteredItems[0]?.restaurantId, fallbackDeliveryFee]);
+
+  const deliveryFee = verifiedDeliveryFee ?? (
+    filteredItems.length > 0
+      ? resolveDeliveryCharge(filteredItems[0], fallbackDeliveryFee)
+      : fallbackDeliveryFee
+  );
+
+  // New Charges Logic - Use fullRestaurant if available, fallback to firstItem
+  const taxRate = fullRestaurant?.taxRate ?? fullRestaurant?.tax_rate ?? filteredItems[0]?.taxRate ?? 0;
+  const serviceChargeRate = fullRestaurant?.serviceChargeRate ?? fullRestaurant?.service_charge_rate ?? filteredItems[0]?.serviceChargeRate ?? 0;
+  const isTaxIncluded = fullRestaurant?.isTaxIncluded ?? fullRestaurant?.is_tax_included ?? filteredItems[0]?.isTaxIncluded ?? false;
+
+  const serviceChargeAmount = subtotal * (serviceChargeRate / 100);
+  const taxAmount = isTaxIncluded ? 0 : subtotal * (taxRate / 100);
+    
+  const finalTotal = subtotal + deliveryFee + serviceChargeAmount + taxAmount;
+
+  console.log("DEBUG: CheckoutScreen delivery calculation", {
+    cartDeliveryCharges: cartItems.length > 0 ? cartItems[0].deliveryCharges : 'no items',
+    finalDeliveryFee: deliveryFee
+  });
+
+  // Get restaurant currency from filtered items
+  const restaurantCurrency = filteredItems.length > 0 ? filteredItems[0].restaurantCurrency : undefined;
 
   const [paymentMethod, setPaymentMethod] = useState('cod');
+  const [orderInstructions, setOrderInstructions] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [lastOrderId, setLastOrderId] = useState<string | null>(null);
+
+  // Scheduled Order State
+  const [isScheduled, setIsScheduled] = useState(false);
+  const [scheduledDate, setScheduledDate] = useState<Date | null>(null);
+  const [scheduledSlot, setScheduledSlot] = useState<string | null>(null);
+
+  // Gift State
+  const [isGift, setIsGift] = useState(false);
+  const [recipientName, setRecipientName] = useState('');
+  const [recipientPhone, setRecipientPhone] = useState('');
+  
+  // Accordion Expand/Collapse State
+  const [isSummaryExpanded, setIsSummaryExpanded] = useState(true);
+
+  const insets = useSafeAreaInsets();
+  const tabBarHeight = useBottomTabBarHeight();
+  const footerButtonGap = 12;
+
+  // Load saved data when the screen is focused
+  useFocusEffect(
+    useCallback(() => {
+      let isMounted = true;
+      const loadSavedData = async () => {
+        const restaurantIdToCheck = activeRestaurantId || filteredItems[0]?.restaurantId;
+        if (!restaurantIdToCheck) return;
+        try {
+          const savedInstructions = await AsyncStorage.getItem(`order_instructions_${restaurantIdToCheck}`);
+          if (isMounted) {
+            setOrderInstructions(savedInstructions || '');
+          }
+          const savedPayment = await AsyncStorage.getItem(`payment_method_${restaurantIdToCheck}`);
+          if (isMounted) {
+            setPaymentMethod(savedPayment || 'cod');
+          }
+        } catch (err) {
+          console.error('[CheckoutScreen] Failed to load saved data:', err);
+        }
+      };
+      loadSavedData();
+      return () => {
+        isMounted = false;
+      };
+    }, [activeRestaurantId, filteredItems[0]?.restaurantId])
+  );
+
 
   const handlePlaceOrder = async () => {
+    console.log("handlePlaceOrder initiated");
     try {
       setLoading(true);
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('User not authenticated');
-  
-      // Group items by restaurant (we assume only one restaurant is in the cart)
+      if (!user) {
+        console.error("Place Order failed: No user");
+        throw new Error('User not authenticated');
+      }
+      console.log("User authenticated:", user.id);
+
+      // Group items by restaurant
       const restaurantGroups = cartItems.reduce((acc, item) => {
         const key = item.restaurantId;
         if (!acc[key]) {
@@ -70,565 +220,382 @@ export function CheckoutScreen() {
           };
         }
         acc[key].items.push(item);
-        acc[key].total += item.price * item.quantity;
+        acc[key].total += calculateItemSubtotal(item.price, item.quantity, item.selectedOptions);
         return acc;
       }, {} as Record<string, any>);
-  
-      // Create orders and order items for each restaurant group
-      for (const restaurantId of Object.keys(restaurantGroups)) {
-        const group = restaurantGroups[restaurantId];
-  
-        // Generate a unique order ID using cuid
-        const orderId = cuid();
-        // Get current timestamp in ISO format
-        const currentTimestamp = new Date().toISOString();
-  
-        // Create the full delivery address string
-        const deliveryAddressString = `${deliveryAddress.streetAddress}, ${deliveryAddress.city}, ${deliveryAddress.state}, ${deliveryAddress.zipCode}`;
-  
-        // Insert the order record
-        const { data: orderData, error: orderError } = await supabase
-          .from('Order')
-          .insert([{
-            id: orderId,
-            userId: user.id,
-            restaurantId: restaurantId,
-            status: 'PENDING',
-            totalAmount: finalTotal,
-            deliveryAddress: deliveryAddressString,
-            paymentMethod: paymentMethod,
-            updatedAt: currentTimestamp,
-          }])
-          .select('id')
-          .maybeSingle();          
-        if (orderError) throw orderError;
-        
-        // Prepare order items for insertion
-        const orderItems = group.items.map((item: any) => ({
-          id: cuid(),
-          orderId: orderId,
-          menuItemId: item.id,
-          quantity: item.quantity,
-          price: item.price,
-          name: item.name,
-          updatedAt: currentTimestamp,
-        }));
-  
-        // Insert order items
-        const { error: itemsError } = await supabase
-          .from('OrderItem')
-          .insert(orderItems);
-  
-        if (itemsError) throw itemsError;
+
+      console.log("Restaurant groups prepared:", Object.keys(restaurantGroups));
+
+      // Create orders via the Vercel API for the specific restaurant
+      const restaurantToProcess = activeRestaurantId || Object.keys(restaurantGroups)[0];
+      const group = restaurantGroups[restaurantToProcess];
+
+      if (!group) {
+        throw new Error('No items found for the selected restaurant');
       }
-      
-      clearCart(); // Clear the cart upon successful order placement
-      
-      // Reset the navigation stack so that Orders screen is the new root
-      navigation.reset({
-        index: 0,
-        routes: [{ name: 'MainTabs' }],
-      });
-      
-      Alert.alert('Success', 'Order placed successfully!');
-    } catch (error) {
+
+      // Create the full delivery address string
+      const deliveryAddressString = `${deliveryAddress.streetAddress}, ${deliveryAddress.city}, ${deliveryAddress.state}, ${deliveryAddress.zipCode}`;
+
+      console.log("Creating order through Vercel API...", { restaurantId: restaurantToProcess });
+
+      // Prepare the order payload for the Vercel API
+      const orderPayload = {
+        userId: user.id,
+        restaurantId: restaurantToProcess,
+        items: group.items.map((item: any) => {
+          return {
+            menuItemId: item.id,
+            quantity: item.quantity,
+            price: calculateItemSubtotal(item.price, 1, item.selectedOptions), // Item unit price with addons
+            name: item.name,
+            options: item.selectedOptions || null,
+          };
+        }),
+        totalAmount: finalTotal,
+        selectedAddress: deliveryAddressString,
+        paymentMethod: paymentMethod,
+        phoneNumber: deliveryAddress.phoneNumber,
+        scheduledDate: isScheduled ? scheduledDate?.toISOString() : null,
+        scheduledSlot: isScheduled ? scheduledSlot : null,
+        recipientName: isGift && recipientName.trim() !== '' ? recipientName : null,
+        recipientPhone: isGift && recipientPhone.trim() !== '' ? recipientPhone : null,
+        orderVertical: "RESTAURANT", // Explicitly set based on backend schema
+        taxAmount: taxAmount,
+        serviceChargeAmount: serviceChargeAmount,
+      };
+
+      try {
+        const createdOrder = await createOrder(orderPayload);
+        console.log("Order created successfully through API:", createdOrder.id);
+        setLastOrderId(createdOrder.id);
+      } catch (apiError: any) {
+        console.error("API Order creation failed:", apiError);
+        const errorMsg = apiError.message || 'Restaurant is not accepting orders at this time.';
+        throw new Error(errorMsg);
+      }
+
+      clearRestaurantCart(restaurantToProcess); // Clear only the checked-out restaurant's items
+      console.log("Restaurant-specific cart cleared:", restaurantToProcess);
+
+      // Show Custom Success Modal instead of Alert and Reset
+      setShowSuccessModal(true);
+    } catch (error: any) {
       console.error('Order placement error:', error);
-      Alert.alert('Error', 'Failed to place order');
+      Alert.alert(
+        t('common.error'), 
+        error.message || t('checkout.error_message')
+      );
     } finally {
       setLoading(false);
     }
   };
-  
-  
+
+
 
   if (loading) {
-    return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#FF6B3F" />
-        <Text style={styles.loadingText}>Processing your order...</Text>
-      </View>
-    );
+    return <Preloader fullScreen label={t('checkout.processing')} />;
   }
 
+  // Define a default map region if delivery address has coordinates, otherwise some defaults
+  const mapRegion = {
+    latitude: deliveryAddress?.latitude || 37.78825,
+    longitude: deliveryAddress?.longitude || -122.4324,
+    latitudeDelta: 0.015,
+    longitudeDelta: 0.0121,
+  };
+
   return (
-    <SafeAreaView style={styles.container}>
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Delivery Address Section */}
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <View style={styles.iconContainer}>
-              <MaterialCommunityIcons name="map-marker-outline" size={22} color="#FF6B3F" />
-            </View>
-            <Text style={styles.cardTitle}>Delivery Address</Text>
-          </View>
-          
-          <View style={styles.cardContent}>
-            <Text style={styles.addressLabel}>{deliveryAddress.label}</Text>
-            <Text style={styles.addressText}>{deliveryAddress.streetAddress}</Text>
-            <Text style={styles.addressText}>
-              {deliveryAddress.city}, {deliveryAddress.state} {deliveryAddress.zipCode}
-            </Text>
-            <View style={styles.phoneRow}>
-              <Ionicons name="call-outline" size={16} color="#6B7280" />
-              <Text style={styles.phoneText}>{deliveryAddress.phoneNumber}</Text>
-            </View>
-          </View>
+    <View style={styles.container}>
+      {/* Custom Orange Header */}
+      <View style={[styles.customHeader, { paddingTop: insets.top + 4 }]}>
+        <TouchableOpacity style={styles.backButton} onPress={() => navigation.goBack()}>
+          <Ionicons name="arrow-back" size={24} color="#FFF" />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>{t('checkout.title', 'Checkout')}</Text>
+      </View>
+
+      <ScrollView style={styles.content} showsVerticalScrollIndicator={false} bounces={false}>
+        {/* Decorative Map View */}
+        <View style={styles.mapContainer}>
+          <MapView
+            style={styles.map}
+            initialRegion={mapRegion}
+            scrollEnabled={false}
+            zoomEnabled={false}
+            pitchEnabled={false}
+            rotateEnabled={false}
+          />
         </View>
 
-        {/* Order Details Section */}
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <View style={styles.iconContainer}>
-              <MaterialCommunityIcons name="food-outline" size={22} color="#FF6B3F" />
+        <View style={styles.sectionPadding}>
+          {/* Delivery Time Header */}
+          <View style={styles.deliveryTimeHeaderRow}>
+            <View style={styles.deliveryTimeTitleContainer}>
+              <Ionicons name="time-outline" size={22} color="#333" />
+              <Text style={styles.deliveryTimeTitle}>Delivery Time</Text>
             </View>
-            <Text style={styles.cardTitle}>Order Details</Text>
+            <Text style={styles.deliveryTimeValue}>20-25 min</Text>
           </View>
-          
-          {cartItems.length > 0 && (
-            <View style={styles.cardContent}>
-              <View style={styles.restaurantRow}>
-                <Ionicons name="restaurant-outline" size={18} color="#4B5563" />
-                <Text style={styles.restaurantName}>
-                  {cartItems[0].restaurantName}
-                </Text>
-              </View>
-              
-              <View style={styles.divider} />
-              
-              {cartItems.map((item, index) => (
-                <View key={item.id} style={[
-                  styles.orderItem,
-                  index === cartItems.length - 1 ? null : styles.orderItemBorder
-                ]}>
-                  <View style={styles.itemQuantity}>
-                    <Text style={styles.quantityText}>{item.quantity}x</Text>
-                  </View>
-                  <View style={styles.itemDetails}>
-                    <Text style={styles.itemName}>{item.name}</Text>
-                  </View>
-                  <Text style={styles.itemPrice}>
-                    ${(item.price * item.quantity).toFixed(2)}
-                  </Text>
-                </View>
-              ))}
-            </View>
-          )}
+
+          {/* Timing Toggles */}
+          <DeliveryTimingCard 
+            restaurantId={activeRestaurantId || (filteredItems.length > 0 ? filteredItems[0].restaurantId : '')}
+            onTimingChange={(scheduled, date, slot) => {
+              setIsScheduled(scheduled);
+              setScheduledDate(date);
+              setScheduledSlot(slot);
+            }}
+            t={t}
+          />
         </View>
 
-        {/* Payment Method Section */}
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <View style={styles.iconContainer}>
-              <MaterialCommunityIcons name="credit-card-outline" size={22} color="#FF6B3F" />
+        {/* List Info (Address, Door, Phone, Gift) */}
+        <View style={styles.listContainer}>
+          <TouchableOpacity style={styles.listRow} onPress={() => navigation.navigate('Addresses' as any)}>
+            <View style={styles.listIconContainer}>
+              <MapPin size={22} color="#000000" strokeWidth={2.2} />
             </View>
-            <Text style={styles.cardTitle}>Payment Method</Text>
-          </View>
-          
-          <View style={styles.cardContent}>
-            <TouchableOpacity
-              style={[
-                styles.paymentOption,
-                paymentMethod === 'cod' && styles.selectedPaymentOption,
-              ]}
-              onPress={() => setPaymentMethod('cod')}
-            >
-              <View style={styles.paymentIconContainer}>
-                <FontAwesome5 name="money-bill-wave" size={18} color={paymentMethod === 'cod' ? '#FF6B3F' : '#6B7280'} />
-              </View>
-              <View style={styles.paymentTextContainer}>
-                <Text style={[
-                  styles.paymentOptionText,
-                  paymentMethod === 'cod' && styles.selectedPaymentOptionText,
-                ]}>
-                  Cash on Delivery
-                </Text>
-                <Text style={styles.paymentDescription}>Pay when your order arrives</Text>
-              </View>
-              <View style={styles.radioContainer}>
-                <View style={[
-                  styles.radioOuter,
-                  paymentMethod === 'cod' && styles.radioOuterSelected
-                ]}>
-                  {paymentMethod === 'cod' && <View style={styles.radioInner} />}
-                </View>
-              </View>
-            </TouchableOpacity>
+            <View style={styles.listContent}>
+              <Text style={styles.listTitle} numberOfLines={1}>{deliveryAddress.streetAddress}</Text>
+              <Text style={styles.listSub} numberOfLines={1}>{deliveryAddress.city}, {deliveryAddress.state} {deliveryAddress.zipCode}</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.listRow} 
+            onPress={() => navigation.navigate('OrderInstructions' as any, { restaurantId: activeRestaurantId || filteredItems[0]?.restaurantId })}
+          >
+            <View style={styles.listIconContainer}>
+              <ShoppingBag size={20} color="#000000" strokeWidth={2.2} />
+            </View>
+            <View style={styles.listContent}>
+              <Text style={styles.listTitle}>Leave it at my door</Text>
+              <Text style={styles.listSub} numberOfLines={1}>Add more Details</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.listRow}>
+            <View style={styles.listIconContainer}>
+              <Phone size={20} color="#000000" strokeWidth={2.2} />
+            </View>
+            <View style={styles.listContent}>
+              <Text style={styles.listTitle}>{deliveryAddress.phoneNumber || 'Add phone number'}</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={[styles.listRow, { borderBottomWidth: 0 }]} 
+            onPress={() => setIsGift(!isGift)}
+          >
+            <View style={styles.listIconContainer}>
+              <Gift size={20} color="#000000" strokeWidth={2.2} />
+            </View>
+            <View style={styles.listContent}>
+              <Text style={styles.listTitle}>Send as a gift</Text>
+            </View>
+            <Ionicons name={isGift ? "chevron-down" : "chevron-forward"} size={20} color="#9CA3AF" />
+          </TouchableOpacity>
+        </View>
+
+        {/* Gift Input fields (If active) */}
+        {isGift && (
+          <View style={styles.giftExpandedContainer}>
+            <Text style={styles.inputLabel}>{t('checkout.recipient_name_placeholder', 'Recipient Name')}</Text>
+            <TextInput
+              style={styles.textInputProminent}
+              placeholder="e.g. John Doe"
+              value={recipientName}
+              onChangeText={setRecipientName}
+              placeholderTextColor="#9CA3AF"
+            />
             
-            <TouchableOpacity
-              style={[
-                styles.paymentOption,
-                paymentMethod === 'card' && styles.selectedPaymentOption,
-              ]}
-              onPress={() => setPaymentMethod('card')}
-            >
-              <View style={styles.paymentIconContainer}>
-                <FontAwesome5 name="credit-card" size={18} color={paymentMethod === 'card' ? '#FF6B3F' : '#6B7280'} />
-              </View>
-              <View style={styles.paymentTextContainer}>
-                <Text style={[
-                  styles.paymentOptionText,
-                  paymentMethod === 'card' && styles.selectedPaymentOptionText,
-                ]}>
-                  Credit/Debit Card
-                </Text>
-                <Text style={styles.paymentDescription}>Add a new card or use existing</Text>
-              </View>
-              <View style={styles.radioContainer}>
-                <View style={[
-                  styles.radioOuter,
-                  paymentMethod === 'card' && styles.radioOuterSelected
-                ]}>
-                  {paymentMethod === 'card' && <View style={styles.radioInner} />}
+            <Text style={styles.inputLabel}>{t('checkout.recipient_phone_placeholder', 'Recipient Phone')}</Text>
+            <TextInput
+              style={styles.textInputProminent}
+              placeholder="(99) 9999-9999"
+              value={recipientPhone}
+              onChangeText={(text) => setRecipientPhone(text.replace(/[^0-9]/g, ''))}
+              keyboardType="numeric"
+              placeholderTextColor="#9CA3AF"
+              maxLength={15}
+            />
+          </View>
+        )}
+
+        {/* Payment Section (Separated) */}
+        <View style={styles.thickSeparator} />
+        <TouchableOpacity 
+          style={styles.paymentRowContainer} 
+          onPress={() => navigation.navigate('PaymentSelection' as any, { restaurantId: activeRestaurantId || filteredItems[0]?.restaurantId })}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={styles.listIconContainer}>
+              <CreditCard size={20} color="#000000" strokeWidth={2.2} />
+            </View>
+            <Text style={styles.listTitle}>payment</Text>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {paymentMethod === 'cod' ? (
+              <Text style={[styles.listSub, { marginTop: 0, marginRight: 8 }]}>
+                Cash on Delivery (COD)
+              </Text>
+            ) : (
+              <View style={styles.paymentMethodDetails}>
+                <View style={styles.paymentCardIcon}>
+                  <Text style={styles.paymentCardText}>VISA</Text>
                 </View>
+                <Text style={styles.paymentCardNumber}>...4564</Text>
               </View>
-            </TouchableOpacity>
+            )}
+            <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
+          </View>
+        </TouchableOpacity>
+        <View style={styles.thickSeparator} />
+
+
+        {/* Order Summary */}
+        <TouchableOpacity 
+          style={styles.summaryHeader}
+          onPress={() => setIsSummaryExpanded(!isSummaryExpanded)}
+          activeOpacity={0.7}
+        >
+          <View style={styles.summaryTitleContainer}>
+            <Receipt size={20} color="#000000" strokeWidth={2.2} />
+            <Text style={styles.summaryTitle}>Order Summary ({cartItems.length} Items)</Text>
+          </View>
+          <Ionicons name={isSummaryExpanded ? "chevron-down" : "chevron-forward"} size={20} color="#000000" />
+        </TouchableOpacity>
+
+        {isSummaryExpanded && (
+          <>
+            <View style={styles.itemsSubHeaderRow}>
+              <Text style={styles.itemsSubHeader}>Items</Text>
+              <TouchableOpacity
+                style={styles.exploreItemsButton}
+                onPress={() => {
+                  const restaurantIdToReturn =
+                    activeRestaurantId || filteredItems[0]?.restaurantId;
+                  navigation.navigate('HomeTab' as any, {
+                    screen: 'Restaurants',
+                    params: {
+                      fromCheckout: true,
+                      checkoutParams: {
+                        deliveryAddress: route.params.deliveryAddress,
+                        restaurantId: restaurantIdToReturn,
+                      },
+                    },
+                  });
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.exploreItemsButtonText}>
+                  {t('navigation.explore', 'Explore')}
+                </Text>
+              </TouchableOpacity>
+            </View>
+            {filteredItems.map((item, index) => (
+              <View key={`${item.id}-${getCartItemKey(item.id, item.selectedOptions)}`} style={styles.itemRow}>
+                {item.image ? <Image source={{ uri: item.image }} style={styles.itemImage} /> : <View style={styles.itemImage} />}
+                <View style={styles.itemInfo}>
+                  <Text style={styles.itemName} numberOfLines={1}>{item.name}</Text>
+                  <Text style={styles.itemPrice}>{formatPrice(calculateItemSubtotal(item.price, 1, item.selectedOptions), restaurantCurrency)}</Text>
+                </View>
+                <QuantitySelector
+                  variant="checkout"
+                  initialQuantity={item.quantity}
+                  alwaysExpanded
+                  showQuantitySuffix
+                  size="small"
+                  containerStyle={styles.checkoutQuantityPill}
+                  onUpdate={(newQty) => {
+                    if (newQty > item.quantity) {
+                      addToCart({ ...item, quantity: 1 });
+                    } else if (newQty < item.quantity) {
+                      removeFromCart(item.id, item.selectedOptions);
+                    }
+                  }}
+                />
+              </View>
+            ))}
+          </>
+        )}
+
+        {/* Receipt Details */}
+        <View style={styles.receiptContainer}>
+          <View style={styles.receiptRow}>
+            <Text style={styles.receiptLabel}>Subtotal</Text>
+            <Text style={styles.receiptValue}>{formatPrice(subtotal, restaurantCurrency)}</Text>
+          </View>
+          <View style={styles.receiptRow}>
+            <Text style={styles.receiptLabel}>Delivery Fee</Text>
+            <Text style={styles.receiptValue}>{formatPrice(deliveryFee, restaurantCurrency)}</Text>
+          </View>
+          <View style={styles.receiptRow}>
+            <Text style={styles.receiptLabel}>Fee & Estimated Tax</Text>
+            <Text style={styles.receiptValue}>{formatPrice(taxAmount + serviceChargeAmount, restaurantCurrency)}</Text>
+          </View>
+          <View style={styles.receiptRow}>
+            <Text style={styles.receiptDiscountLabel}>Discount</Text>
+            <Text style={styles.receiptDiscountValue}>-{formatPrice(0, restaurantCurrency)}</Text>
+          </View>
+
+          <View style={styles.totalContainer}>
+            <Text style={styles.totalLabel}>Total</Text>
+            <Text style={styles.totalValue}>{formatPrice(finalTotal, restaurantCurrency)}</Text>
           </View>
         </View>
 
-        {/* Order Summary Section */}
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <View style={styles.iconContainer}>
-              <MaterialCommunityIcons name="receipt-outline" size={22} color="#FF6B3F" />
-            </View>
-            <Text style={styles.cardTitle}>Order Summary</Text>
-          </View>
-          
-          <View style={styles.cardContent}>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryText}>Subtotal</Text>
-              <Text style={styles.summaryValue}>${total.toFixed(2)}</Text>
-            </View>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryText}>Delivery Fee</Text>
-              <Text style={styles.summaryValue}>${deliveryFee.toFixed(2)}</Text>
-            </View>
-            <View style={styles.divider} />
-            <View style={styles.totalRow}>
-              <Text style={styles.totalText}>Total</Text>
-              <Text style={styles.totalValue}>${finalTotal.toFixed(2)}</Text>
-            </View>
-          </View>
-        </View>
-        
-        {/* Extra space at bottom for scrolling */}
         <View style={styles.bottomSpace} />
       </ScrollView>
 
-      {/* Place Order Button */}
-      <View style={styles.footer}>
-        <View style={styles.footerContent}>
-          <View style={styles.footerPriceContainer}>
-            <Text style={styles.footerPriceLabel}>Total</Text>
-            <Text style={styles.footerPrice}>${finalTotal.toFixed(2)}</Text>
-          </View>
-          
-          <TouchableOpacity
-            style={styles.placeOrderButton}
-            onPress={handlePlaceOrder}
-            activeOpacity={0.8}
-          >
-            <LinearGradient
-              colors={['#FF6B3F', '#FF4B2B']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.gradientButton}
-            >
-              <Text style={styles.placeOrderButtonText}>Place Order</Text>
-              <Ionicons name="arrow-forward" size={20} color="#fff" />
-            </LinearGradient>
-          </TouchableOpacity>
-        </View>
+      {/* Floating Footer */}
+      <View
+        style={[
+          styles.footer,
+          {
+            paddingTop: footerButtonGap,
+            paddingBottom:
+              footerButtonGap + (tabBarHeight > 0 ? 0 : insets.bottom),
+          },
+        ]}
+      >
+        <TouchableOpacity 
+          style={styles.placeOrderBtn} 
+          onPress={handlePlaceOrder}
+          activeOpacity={0.9}
+        >
+          <Text style={styles.placeOrderText}>{t('checkout.place_order', 'Place Order')}</Text>
+          <Text style={styles.placeOrderTotal}>{formatPrice(finalTotal, restaurantCurrency)}</Text>
+        </TouchableOpacity>
       </View>
-    </SafeAreaView>
+
+      <OrderSuccessModal
+        isVisible={showSuccessModal}
+        orderId={lastOrderId || undefined}
+        onTrack={() => {
+          setShowSuccessModal(false);
+          navigation.popToTop();
+          if (lastOrderId) {
+            navigation.navigate('OrdersTab' as any, {
+              screen: 'OrderDetails',
+              params: { order: { id: lastOrderId, restaurantId: cartItems[0]?.restaurantId } }
+            });
+          } else {
+            navigation.navigate('HomeTab' as any);
+          }
+        }}
+        onHome={() => {
+          setShowSuccessModal(false);
+          navigation.popToTop();
+          navigation.navigate('HomeTab' as any);
+        }}
+      />
+    </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#F9FAFB',
-  },
-  header: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1F2937',
-  },
-  content: {
-    flex: 1,
-    paddingHorizontal: 16,
-    paddingTop: 2,
-  },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 3,
-    overflow: 'hidden',
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
-  },
-  iconContainer: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#FFF5F2',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1F2937',
-  },
-  cardContent: {
-    padding: 16,
-  },
-  addressLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1F2937',
-    marginBottom: 4,
-  },
-  addressText: {
-    fontSize: 15,
-    color: '#4B5563',
-    marginBottom: 2,
-    lineHeight: 22,
-  },
-  phoneRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  phoneText: {
-    fontSize: 14,
-    color: '#6B7280',
-    marginLeft: 6,
-  },
-  restaurantRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  restaurantName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1F2937',
-    marginLeft: 8,
-  },
-  divider: {
-    height: 1,
-    backgroundColor: '#F3F4F6',
-    marginVertical: 12,
-  },
-  orderItem: {
-    flexDirection: 'row',
-    paddingVertical: 10,
-  },
-  orderItemBorder: {
-    borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
-  },
-  itemQuantity: {
-    width: 30,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  quantityText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#FF6B3F',
-  },
-  itemDetails: {
-    flex: 1,
-    paddingHorizontal: 10,
-  },
-  itemName: {
-    fontSize: 15,
-    color: '#1F2937',
-  },
-  itemPrice: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#1F2937',
-  },
-  paymentOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 14,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    borderRadius: 12,
-    marginBottom: 12,
-  },
-  selectedPaymentOption: {
-    borderColor: '#FF6B3F',
-    backgroundColor: '#FFF5F2',
-  },
-  paymentIconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#F3F4F6',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  paymentTextContainer: {
-    flex: 1,
-    marginLeft: 12,
-  },
-  paymentOptionText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#1F2937',
-  },
-  selectedPaymentOptionText: {
-    color: '#FF6B3F',
-  },
-  paymentDescription: {
-    fontSize: 13,
-    color: '#6B7280',
-    marginTop: 2,
-  },
-  radioContainer: {
-    width: 24,
-    height: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  radioOuter: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    borderWidth: 2,
-    borderColor: '#D1D5DB',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  radioOuterSelected: {
-    borderColor: '#FF6B3F',
-  },
-  radioInner: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#FF6B3F',
-  },
-  summaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-  },
-  summaryText: {
-    fontSize: 15,
-    color: '#4B5563',
-  },
-  summaryValue: {
-    fontSize: 15,
-    color: '#1F2937',
-  },
-  totalRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  totalText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1F2937',
-  },
-  totalValue: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#FF6B3F',
-  },
-  bottomSpace: {
-    height: 80,
-  },
-  footer: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: '#fff',
-    borderTopWidth: 1,
-    borderTopColor: '#F3F4F6',
-    paddingTop: 12,
-    paddingBottom: 24,
-    paddingHorizontal: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -3 },
-    shadowOpacity: 0.1,
-    shadowRadius: 5,
-    elevation: 10,
-  },
-  footerContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  footerPriceContainer: {
-    flex: 1,
-  },
-  footerPriceLabel: {
-    fontSize: 13,
-    color: '#6B7280',
-  },
-  footerPrice: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1F2937',
-  },
-  placeOrderButton: {
-    flex: 1.2,
-    height: 54,
-    borderRadius: 12,
-    overflow: 'hidden',
-  },
-  gradientButton: {
-    flex: 1,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  placeOrderButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-    marginRight: 8,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#F9FAFB',
-  },
-  loadingText: {
-    marginTop: 16,
-    fontSize: 16,
-    color: '#4B5563',
-  },
-});
+export default CheckoutScreen;

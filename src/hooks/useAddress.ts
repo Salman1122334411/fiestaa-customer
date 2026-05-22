@@ -21,15 +21,25 @@ interface Address {
 interface AddressState {
   addresses: Address[];
   loading: boolean;
+  selectedDeliveryAddressId: string | null;
+  selectedAddress: Address | null; // Added this
+  setSelectedDeliveryAddress: (id: string) => void;
   fetchAddresses: () => Promise<void>;
   addAddress: (newAddress: Partial<Address>) => Promise<void>;
+  updateAddress: (addressId: string, updatedAddress: Partial<Address>) => Promise<void>;
   setDefaultAddress: (addressId: string) => Promise<void>;
   deleteAddress: (addressId: string) => Promise<void>;
 }
 
-export const useAddress = create<AddressState>((set) => ({
+export const useAddress = create<AddressState>((set, get) => ({
   addresses: [],
   loading: true,
+  selectedDeliveryAddressId: null,
+  selectedAddress: null,
+  setSelectedDeliveryAddress: (id) => set((state) => ({
+    selectedDeliveryAddressId: id,
+    selectedAddress: state.addresses.find(a => a.id === id) || null
+  })),
   fetchAddresses: async () => {
     set({ loading: true });
     try {
@@ -38,13 +48,23 @@ export const useAddress = create<AddressState>((set) => ({
 
       const { data, error } = await supabase
         .from('Address')
-        .select('*')
+        .select('id, userId, label, streetAddress, city, state, zipCode, phoneNumber, latitude, longitude, isDefault, createdAt, updatedAt')
         .eq('userId', user.id)
         .order('isDefault', { ascending: false });
 
+
       if (error) throw error;
 
-      set({ addresses: data || [] });
+      const addresses = data || [];
+      // Find the default address to set as initially selected
+      const defaultAddr = addresses.find(a => a.isDefault);
+
+      set({
+        addresses: addresses,
+        // If there's a default address, select it. Otherwise select the first one if available.
+        selectedDeliveryAddressId: defaultAddr ? defaultAddr.id : (addresses.length > 0 ? addresses[0].id : null),
+        selectedAddress: defaultAddr || (addresses.length > 0 ? addresses[0] : null)
+      });
     } catch (error) {
       console.error('Error fetching addresses:', error);
     } finally {
@@ -75,30 +95,80 @@ export const useAddress = create<AddressState>((set) => ({
         .select()
         .maybeSingle();
       if (error) throw error;
-
-      set((state) => ({ addresses: [...state.addresses, data] }));
+      if (data) {
+        set((state) => {
+          const newAddresses = [...state.addresses, data];
+          const shouldSelect = !state.selectedDeliveryAddressId;
+          return {
+            addresses: newAddresses,
+            selectedDeliveryAddressId: shouldSelect ? data.id : state.selectedDeliveryAddressId,
+            selectedAddress: shouldSelect ? data : state.selectedAddress,
+          };
+        });
+      } else {
+        // Fallback: Fetch all addresses to ensure sync if data was not returned
+        await get().fetchAddresses();
+      }
     } catch (error) {
       console.error('Error adding address:', error);
     }
   },
-  setDefaultAddress: async (addressId) => {
+  updateAddress: async (addressId, updatedAddress) => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('No user found');
 
-      await supabase.from('Address').update({ isDefault: false }).eq('userId', user.id);
+      const currentTimestamp = new Date().toISOString();
 
-      const { error } = await supabase
+      // If isDefault is true in the update, we need to unset other defaults first
+      if (updatedAddress.isDefault) {
+        await supabase.from('Address')
+          .update({ isDefault: false, updatedAt: currentTimestamp })
+          .eq('userId', user.id);
+      }
+
+      const { data, error } = await supabase
         .from('Address')
-        .update({ isDefault: true })
-        .eq('id', addressId);
+        .update({
+          ...updatedAddress,
+          updatedAt: currentTimestamp,
+        })
+        .eq('id', addressId)
+        .eq('userId', user.id)
+        .select()
+        .maybeSingle();
 
       if (error) throw error;
 
+      // Optimistically update the local state to reflect changes immediately
+      set((state) => {
+        const newAddresses = state.addresses.map((address) => {
+          if (address.id === addressId) {
+            return data || { ...address, ...updatedAddress };
+          }
+          if (updatedAddress.isDefault) {
+            return { ...address, isDefault: false };
+          }
+          return address;
+        });
+        
+        return {
+          addresses: newAddresses,
+          selectedAddress: newAddresses.find(a => a.id === state.selectedDeliveryAddressId) || null
+        };
+      });
+
+      // Re-fetch to ensure consistency (optional but safer)
       await useAddress.getState().fetchAddresses();
+
     } catch (error) {
-      console.error('Error setting default address:', error);
+      console.error('Error updating address:', error);
+      throw error;
     }
+  },
+  setDefaultAddress: async (addressId) => {
+    // Re-use the updateAddress logic to ensure dry code
+    await useAddress.getState().updateAddress(addressId, { isDefault: true });
   },
   deleteAddress: async (addressId) => {
     try {
@@ -106,9 +176,16 @@ export const useAddress = create<AddressState>((set) => ({
 
       if (error) throw error;
 
-      set((state) => ({
-        addresses: state.addresses.filter((address) => address.id !== addressId),
-      }));
+      set((state) => {
+        const newAddresses = state.addresses.filter((address) => address.id !== addressId);
+        const newSelectedId = state.selectedDeliveryAddressId === addressId ? (newAddresses.length > 0 ? newAddresses[0].id : null) : state.selectedDeliveryAddressId;
+        
+        return {
+          addresses: newAddresses,
+          selectedDeliveryAddressId: newSelectedId,
+          selectedAddress: newAddresses.find(a => a.id === newSelectedId) || null
+        };
+      });
     } catch (error) {
       console.error('Error deleting address:', error);
     }

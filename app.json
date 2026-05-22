@@ -2,34 +2,54 @@
   "expo": {
     "name": "mobile",
     "slug": "mobile",
-    "version": "1.0.0",
-    "orientation": "portrait",
-    "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
-    "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
-    "ios": {
-      "supportsTablet": true,
-      "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "This app needs access to your location to show nearby restaurants and delivery options."
-      }
-    },
+    "scheme": "fiestaa",
+    "ios": {},
     "android": {
+      "package": "com.anonymous.mobile",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff",
-       // "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
-      }
+        "backgroundColor": "#ffffff"
+      },
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ],
+      "softwareKeyboardLayoutMode": "pan",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "fiestaa",
+              "host": "auth",
+              "pathPrefix": "/callback"
+            },
+            {
+              "scheme": "fiestaa"
+            }
+          ],
+          "category": [
+            "DEFAULT",
+            "BROWSABLE"
+          ]
+        }
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png",
       "dangerous": {
         "disableCoop": true
       }
-    }
+    },
+    "extra": {
+      "auth": {
+        "googleClientId": "601001909197-a7i7qjqvd5aimtojh9lub8vvafer2v0u.apps.googleusercontent.com"
+      },
+      "eas": {
+        "projectId": "a96bc73f-8479-484f-888b-780437df6c09"
+      }
+    },
+    "owner": "salman12637"
   }
 }

@@ -1,29 +1,47 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   View,
   Text,
-  StyleSheet,
   ScrollView,
   TouchableOpacity,
   Linking,
-  Alert,
-  ActivityIndicator
+  Image,
+  StyleSheet,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { CircularProgress } from "../../components/CircularProgress";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
+import { useTranslation } from "react-i18next";
+import { formatPrice } from "../utils/currency";
+import { NativeStackScreenProps } from "@react-navigation/native-stack";
+import { getOrderById, getRestaurantByIdFromAPI } from "../lib/api";
+import { LinearGradient } from "expo-linear-gradient";
+import { Colors as BrandColors } from "../constants/Colors";
+import { sendLocalNotification } from "../lib/notifications";
+import { useRef } from "react";
+import { formatDeliveryTimeLabel } from "../utils/deliveryTime";
+import Preloader from "../components/Preloader";
 
 interface OrderItem {
   id: string;
   name: string;
   price: number;
   quantity: number;
-  // Include any other fields as needed (options, createdAt, updatedAt, etc.)
+  options?: string;
 }
 
-interface Restaurant {
+interface RestaurantDetails {
   id: string;
   name: string;
+  currency?: string;
+  coverImage?: string;
+  cuisineType?: string;
+  rating?: number;
+  latitude?: number;
+  longitude?: number;
+  deliveryCharges?: number;
+  deliveryTime?: string;
+  phoneNumber?: string;
 }
 
 export interface Order {
@@ -38,6 +56,8 @@ export interface Order {
     | "DELIVERED"
     | "CANCELLED";
   totalAmount: number;
+  taxAmount?: number;
+  serviceChargeAmount?: number;
   deliveryAddress: string;
   driverId: string | null;
   assignedDriver: string | null;
@@ -50,170 +70,119 @@ export interface Order {
   createdAt: string;
   updatedAt: string;
   orderItems?: OrderItem[];
-  restaurant?: Restaurant;
+  restaurant?: RestaurantDetails;
 }
 
-export function OrderDetailsScreen({
-  route,
-}: {
-  route: { params: { order: Order } };
-}) {
-  const { order } = route.params;
+type RootStackParamList = {
+  OrderDetails: { order: Order };
+};
 
-  // Initialize state with defaults for restaurant and orderItems
+type Props = NativeStackScreenProps<RootStackParamList, "OrderDetails">;
+
+const statusSteps = [
+  { key: "PENDING", icon: "receipt-outline" as const },
+  { key: "CONFIRMED", icon: "checkmark-circle-outline" as const },
+  { key: "PREPARING", icon: "restaurant-outline" as const },
+  { key: "OUT_FOR_DELIVERY", icon: "bicycle-outline" as const },
+  { key: "DELIVERED", icon: "cube-outline" as const },
+];
+
+const statusI18nKey: Record<string, string> = {
+  PENDING: "pending",
+  CONFIRMED: "confirmed",
+  PREPARING: "preparing",
+  OUT_FOR_DELIVERY: "out_for_delivery",
+  DELIVERED: "delivered",
+  CANCELLED: "cancelled",
+};
+
+const getHeroStatusIcon = (status: Order["status"]) => {
+  switch (status) {
+    case "DELIVERED":
+      return "checkmark-done-circle";
+    case "OUT_FOR_DELIVERY":
+      return "bicycle";
+    case "PREPARING":
+      return "restaurant";
+    case "CONFIRMED":
+      return "checkmark-circle";
+    case "CANCELLED":
+      return "close-circle";
+    default:
+      return "receipt";
+  }
+};
+
+export function OrderDetailsScreen({ route, navigation }: Props) {
+  const { order } = route.params;
+  const { t } = useTranslation();
+  const insets = useSafeAreaInsets();
+
   const [currentOrder, setCurrentOrder] = useState<Order>(() => ({
     ...order,
-    restaurant: order.restaurant || { id: "", name: "Restaurant" },
+    restaurant: order.restaurant || { id: "", name: t("orders.restaurant_fallback") },
     orderItems: order.orderItems || [],
   }));
 
-  // Loading and last-updated states
   const [loading, setLoading] = useState(true);
-  const [lastUpdated, setLastUpdated] = useState(new Date());
+  const [showDetails, setShowDetails] = useState(false);
+  const [restaurantDetails, setRestaurantDetails] = useState<RestaurantDetails | null>(null);
 
-  // Date formatting helper
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    });
-  };
+  const deliveryTimeDisplay = useMemo(() => {
+    return formatDeliveryTimeLabel(
+      (restaurantDetails as any)?.deliveryTime ?? currentOrder.estimatedTime,
+      currentOrder.estimatedTime || 30,
+      t("orders.details.mins")
+    );
+  }, [restaurantDetails, currentOrder.estimatedTime, t]);
 
-  // Order progress steps
-  const steps = [
-    { status: "PENDING", label: "Order Placed", icon: "receipt-outline" },
-    { status: "CONFIRMED", label: "Order Confirmed", icon: "checkmark-circle-outline" },
-    { status: "PREPARING", label: "Preparing", icon: "restaurant-outline" },
-    { status: "OUT_FOR_DELIVERY", label: "Out for Delivery", icon: "bicycle-outline" },
-    { status: "DELIVERED", label: "Delivered", icon: "checkmark-done-circle-outline" },
-  ];
+  const currentStepIndex = Math.max(
+    0,
+    statusSteps.findIndex((step) => step.key === currentOrder.status)
+  );
 
-  const formatStatus = (status: string) =>
-    status
-      .split("_")
-      .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-      .join(" ");
+  const fetchData = async () => {
+    try {
+      setLoading(true);
+      const [orderData, restData] = await Promise.all([
+        getOrderById(order.id),
+        currentOrder.restaurantId ? getRestaurantByIdFromAPI(currentOrder.restaurantId) : Promise.resolve(null),
+      ]);
 
-  const getStatusColor = (status: Order["status"]) => {
-    switch (status) {
-      case "PENDING":
-        return "#FCD34D";
-      case "CONFIRMED":
-        return "#60A5FA";
-      case "PREPARING":
-        return "#818CF8";
-      case "OUT_FOR_DELIVERY":
-        return "#34D399";
-      case "DELIVERED":
-        return "#10B981";
-      case "CANCELLED":
-        return "#EF4444";
-      default:
-        return "#6B7280";
+      if (orderData) {
+        setCurrentOrder((prev) => ({
+          ...prev,
+          ...(orderData as any),
+          orderItems: (orderData.orderItems as any) || prev.orderItems || [],
+        }));
+      }
+
+      if (restData) {
+        setRestaurantDetails(restData);
+      }
+    } catch (err) {
+      console.error("Error fetching data:", err);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const currentStepIndex = steps.findIndex(
-    (step) => step.status === currentOrder.status
-  );
-
-  const computedProgress =
-    currentOrder.status === "CANCELLED"
-      ? 0
-      : currentStepIndex !== -1
-      ? Math.round((currentStepIndex / (steps.length - 1)) * 100)
-      : 0;
-
-  const progressColor =
-    currentOrder.status === "CANCELLED" ? "#FF0000" : "#4A90E2";
-
-  const getStatusSteps = () =>
-    steps.map((step, index) => ({
-      ...step,
-      isCompleted: index < currentStepIndex,
-      isCurrent: index === currentStepIndex,
-    }));
-
-  const handleSupport = () => {
-    Linking.openURL("tel:+1234567890");
-  };
-
-  // Fetch order with joined orderItems and restaurant details
   useEffect(() => {
-    const fetchOrder = async () => {
-      const { data, error } = await supabase
-        .from("Order")
-        .select(`
-          id,
-          "userId",
-          status,
-          "totalAmount",
-          "deliveryAddress",
-          "driverId",
-          "assignedAt",
-          "pickedUpAt",
-          "deliveredAt",
-          "estimatedTime",
-          "actualTime",
-          "driverRating",
-          "createdAt",
-          "updatedAt",
-          orderItems:OrderItem(
-             id,
-             "orderId",
-             "menuItemId",
-             quantity,
-             options,
-             price,
-             name,
-             "createdAt",
-             "updatedAt"
-          ),
-          restaurant:Restaurant(
-             id,
-             name
-          )
-        `)
-        .eq("id", order.id)
-        .maybeSingle();
-
-      if (error) {
-        console.error("Error fetching order:", error);
-        Alert.alert("Error", "Failed to load order");
-      } else if (data) {
-        // Ensure orderItems is an array
-        setCurrentOrder({ ...data, orderItems: data.orderItems || [] });
-      }
-      setLoading(false);
-    };
-
-    fetchOrder();
+    fetchData();
   }, [order.id]);
 
-  // Realtime subscription for updates
   useEffect(() => {
     const channel = supabase
-      .channel("schema-db-changes")
+      .channel(`order-details-${order.id}`)
       .on(
         "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "Order",
-          filter: `id=eq.${order.id}`,
-        },
+        { event: "UPDATE", schema: "public", table: "Order", filter: `id=eq.${order.id}` },
         (payload) => {
           setCurrentOrder((prev) => ({
             ...prev,
             ...((payload.new as Order) || {}),
-            orderItems: ((payload.new as Order)?.orderItems) || prev.orderItems || [],
+            orderItems: (payload.new as Order)?.orderItems || prev.orderItems || [],
           }));
-          setLastUpdated(new Date());
         }
       )
       .subscribe();
@@ -223,303 +192,811 @@ export function OrderDetailsScreen({
     };
   }, [order.id]);
 
-  if (loading) {
-    return (
-      <View style={styles.loadingContainer}>
-      <ActivityIndicator size="large" color="#FF4B2B" />
-      </View>
+  const isFirstRender = useRef(true);
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+
+    if (currentOrder?.status) {
+      sendLocalNotification({
+        title: t(`orders.statuses.${currentOrder.status.toLowerCase()}.header_title`, { defaultValue: "Order Update" }),
+        body: t(`orders.statuses.${currentOrder.status.toLowerCase()}.header_desc`, { defaultValue: "Your order status has changed." }),
+      });
+    }
+  }, [currentOrder?.status]);
+
+  const parsedAddress = (() => {
+    try {
+      const addr = JSON.parse(currentOrder.deliveryAddress);
+      return {
+        main: addr.street_address || addr.street || t("orders.details.no_address"),
+        sub: `${addr.city}, ${addr.state} ${addr.zipCode || addr.postal_code || ""}`.trim(),
+      };
+    } catch {
+      return { main: currentOrder.deliveryAddress, sub: "" };
+    }
+  })();
+
+  const fullAddress = parsedAddress.sub
+    ? `${parsedAddress.main}, ${parsedAddress.sub}`
+    : parsedAddress.main;
+
+  const billSummary = useMemo(() => {
+    const currency = currentOrder.restaurant?.currency;
+    const subtotal = (currentOrder.orderItems || []).reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0
     );
+    const taxAmount = currentOrder.taxAmount ?? 0;
+    const serviceChargeAmount = currentOrder.serviceChargeAmount ?? 0;
+    const restaurantDelivery = restaurantDetails?.deliveryCharges ?? 0;
+    const inferredDelivery = Math.max(
+      0,
+      currentOrder.totalAmount - subtotal - taxAmount - serviceChargeAmount
+    );
+    const deliveryFee =
+      restaurantDelivery > 0 ? restaurantDelivery : inferredDelivery;
+
+    return {
+      currency,
+      subtotal,
+      deliveryFee,
+      taxAmount,
+      serviceChargeAmount,
+      total: currentOrder.totalAmount,
+    };
+  }, [currentOrder, restaurantDetails]);
+
+  const handleCallRestaurant = () => {
+    const phone = restaurantDetails?.phoneNumber;
+    if (phone) {
+      Linking.openURL(`tel:${phone}`);
+    }
+  };
+
+  const getStatusTitle = (status: string) => {
+    const key = statusI18nKey[status] || "pending";
+    return t(`orders.statuses.${key}.header_title`);
+  };
+
+  const getStatusDesc = (status: string) => {
+    const key = statusI18nKey[status] || "pending";
+    const desc = t(`orders.statuses.${key}.header_desc`);
+    if (desc && !desc.startsWith("orders.statuses")) return desc;
+    return t(`orders.statuses.${key}.bottom_subtitle`);
+  };
+
+  const getStepLabel = (stepKey: string) => {
+    const key = statusI18nKey[stepKey] || "pending";
+    return t(`orders.statuses.${key}.label`);
+  };
+
+  const timelineProgress =
+    currentStepIndex <= 0
+      ? 0
+      : currentStepIndex / Math.max(statusSteps.length - 1, 1);
+
+  if (loading && !currentOrder.id) {
+    return <Preloader fullScreen label={t("common.processing")} />;
   }
 
   return (
-    <ScrollView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
+      {/* Header */}
       <View style={styles.header}>
-        <View>
-          <Text style={styles.orderId}>Order #{currentOrder.id.slice(-6)}</Text>
-          <Text style={styles.orderDate}>{formatDate(currentOrder.createdAt)}</Text>
+        <TouchableOpacity onPress={() => {
+          if (navigation.canGoBack()) {
+            navigation.goBack();
+          } else {
+            navigation.navigate('OrdersScreen' as any);
+          }
+        }} style={styles.backButton}>
+          <Ionicons name="arrow-back" size={24} color="#111827" />
+        </TouchableOpacity>
+        <View style={styles.headerTitleContainer}>
+          <Text style={styles.headerTitle}>{t("orders.details.title")}</Text>
+          <Text style={styles.headerSubtitle}>#{currentOrder.id.slice(-6).toUpperCase()}</Text>
         </View>
-        <View style={[styles.statusBadge, { backgroundColor: getStatusColor(currentOrder.status) }]}>
-          <Text style={styles.statusText}>{formatStatus(currentOrder.status)}</Text>
-        </View>
+        <View style={styles.headerRight} />
       </View>
 
-      <View style={styles.progressSection}>
-        <CircularProgress
-          progress={computedProgress}
-          size={120}
-          strokeWidth={10}
-          color={progressColor}
-        />
-        <Text style={styles.statusLabel}>{formatStatus(currentOrder.status)}</Text>
-      </View>
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={{ paddingBottom: 32 + insets.bottom }}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Status Card */}
+        <View style={styles.statusCard}>
+          <View style={styles.statusIconContainer}>
+            <View
+              style={[
+                styles.statusIconCircle,
+                currentOrder.status === "DELIVERED" && styles.statusIconCircleSuccess,
+                currentOrder.status === "CANCELLED" && styles.statusIconCircleCancelled,
+              ]}
+            >
+              <Ionicons
+                name={getHeroStatusIcon(currentOrder.status) as any}
+                size={32}
+                color={BrandColors.primary}
+              />
+            </View>
+          </View>
 
-      <View style={styles.timeline}>
-        {getStatusSteps().map((step) => (
-          <View key={step.status} style={styles.timelineItem}>
-            <View style={styles.timelineLeft}>
+          <Text style={styles.statusTitle}>{getStatusTitle(currentOrder.status)}</Text>
+          <Text style={styles.statusDesc}>{getStatusDesc(currentOrder.status)}</Text>
+
+          {/* Order progress timeline */}
+          <View style={styles.timelineSection}>
+            <View style={styles.timelineTrackWrap}>
+              <View style={styles.timelineTrackBg} />
               <View
                 style={[
-                  styles.timelineDot,
-                  step.isCurrent && styles.timelineDotActive,
-                  step.isCompleted && styles.timelineDotCompleted,
+                  styles.timelineTrackFill,
+                  { width: `${Math.min(100, timelineProgress * 100)}%` },
                 ]}
-              >
-                <Ionicons name={step.icon as any} size={16} color="#fff" />
+              />
+              <View style={styles.timelineIconsRow}>
+                {statusSteps.map((step, index) => {
+                  const isActive = index <= currentStepIndex;
+                  const isCurrent = index === currentStepIndex;
+
+                  return (
+                    <View key={step.key} style={styles.timelineStep}>
+                      <View
+                        style={[
+                          styles.timelineIcon,
+                          isActive && styles.timelineIconActive,
+                          isCurrent && styles.timelineIconCurrent,
+                        ]}
+                      >
+                        <Ionicons
+                          name={step.icon}
+                          size={15}
+                          color={isActive ? "#fff" : "#9CA3AF"}
+                        />
+                      </View>
+                    </View>
+                  );
+                })}
               </View>
-              <View style={[styles.timelineLine, step.isCompleted && styles.timelineLineCompleted]} />
             </View>
-            <Text style={[styles.timelineLabel, step.isCurrent && styles.timelineLabelActive]}>
-              {step.label}
+            <View style={styles.timelineLabelsRow}>
+              {statusSteps.map((step, index) => {
+                const isActive = index <= currentStepIndex;
+                const isCurrent = index === currentStepIndex;
+
+                return (
+                  <View key={`${step.key}-label`} style={styles.timelineLabelWrap}>
+                    <Text
+                      style={[
+                        styles.timelineLabel,
+                        isActive && styles.timelineLabelActive,
+                        isCurrent && styles.timelineLabelCurrent,
+                      ]}
+                      numberOfLines={2}
+                    >
+                      {getStepLabel(step.key)}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+        </View>
+
+        {/* Delivery Card */}
+        <LinearGradient
+          colors={[BrandColors.primary, "#FF7043", "#FF8A65"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.deliveryCard}
+        >
+          <View style={styles.deliveryCardDecor}>
+            <Ionicons name="bicycle-outline" size={120} color="rgba(255,255,255,0.12)" />
+          </View>
+
+          <View style={styles.deliveryCardContent}>
+            <Text style={styles.deliveryLabel}>
+              {t("orders.details.estimated_delivery").toUpperCase()}
+            </Text>
+            <Text style={styles.deliveryTime}>{deliveryTimeDisplay}</Text>
+
+            <View style={styles.priorityBadge}>
+              <Ionicons name="flash-outline" size={14} color="#fff" />
+              <Text style={styles.priorityText}>
+                {t("orders.details.delivery_priority")}
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.viewDetailsButton}
+              onPress={() => setShowDetails(!showDetails)}
+              activeOpacity={0.9}
+            >
+              <Text style={styles.viewDetailsText}>
+                {showDetails
+                  ? t("orders.details.hide_details")
+                  : t("orders.details.view_order_details")}
+              </Text>
+              <Ionicons
+                name={showDetails ? "chevron-down" : "chevron-forward"}
+                size={18}
+                color={BrandColors.primary}
+              />
+            </TouchableOpacity>
+          </View>
+        </LinearGradient>
+
+        {/* Order Details (Collapsible) */}
+        {showDetails && (
+          <View style={styles.detailsCard}>
+            {(currentOrder.orderItems || []).map((item, idx) => (
+              <View key={idx} style={styles.detailRow}>
+                <Text style={styles.detailName}>{item.quantity}x {item.name}</Text>
+                <Text style={styles.detailPrice}>{formatPrice(item.price * item.quantity, currentOrder.restaurant?.currency)}</Text>
+              </View>
+            ))}
+            <View style={styles.detailDivider} />
+            <View style={styles.detailRow}>
+              <Text style={styles.detailTotalLabel}>{t("orders.details.total_amount")}</Text>
+              <Text style={styles.detailTotalValue}>{formatPrice(currentOrder.totalAmount, currentOrder.restaurant?.currency)}</Text>
+            </View>
+          </View>
+        )}
+
+        {/* Restaurant Card */}
+        <View style={styles.infoCard}>
+          <Image
+            source={{ uri: restaurantDetails?.coverImage || "https://via.placeholder.com/72" }}
+            style={styles.restaurantLogo}
+            resizeMode="cover"
+          />
+          <View style={styles.restaurantInfo}>
+            <Text style={styles.restaurantName} numberOfLines={1}>
+              {currentOrder.restaurant?.name || t("orders.restaurant_fallback")}
+            </Text>
+            <View style={styles.restaurantMetaRow}>
+              <Text style={styles.restaurantMetaText}>
+                {restaurantDetails?.cuisineType || t("orders.restaurant_fallback")}
+              </Text>
+              <Text style={styles.restaurantMetaDot}>•</Text>
+              <Ionicons name="star" size={12} color="#F59E0B" />
+              <Text style={styles.restaurantMetaText}>
+                {restaurantDetails?.rating != null
+                  ? Number(restaurantDetails.rating).toFixed(1)
+                  : "4.5"}
+              </Text>
+              <Text style={styles.restaurantMetaDot}>•</Text>
+              <Text style={styles.restaurantMetaText}>{deliveryTimeDisplay}</Text>
+            </View>
+          </View>
+          <TouchableOpacity
+            style={styles.callButton}
+            onPress={handleCallRestaurant}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="call" size={20} color={BrandColors.primary} />
+          </TouchableOpacity>
+        </View>
+
+        {/* Delivery Address Card */}
+        <View style={styles.infoCard}>
+          <View style={styles.iconCircle}>
+            <Ionicons name="location" size={20} color={BrandColors.primary} />
+          </View>
+          <View style={styles.infoCardBody}>
+            <Text style={styles.sectionLabel}>
+              {t("orders.details.delivery_address").toUpperCase()}
+            </Text>
+            <Text style={styles.addressLine} numberOfLines={3}>
+              {fullAddress}
             </Text>
           </View>
-        ))}
-      </View>
+        </View>
 
-      {/* Restaurant and Delivery Address */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Restaurant</Text>
-        <View style={styles.restaurantInfo}>
-          <Ionicons name="restaurant-outline" size={24} color="#4B5563" />
-          <Text style={styles.restaurantName}>
-            {currentOrder.restaurant ? currentOrder.restaurant.name : "Restaurant"}
-          </Text>
-        </View>
-      </View>
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Delivery Address</Text>
-        <View style={styles.addressContainer}>
-          <Ionicons name="location-outline" size={24} color="#4B5563" />
-          <Text style={styles.address}>
-            {currentOrder.deliveryAddress
-              ? (() => {
-                  try {
-                    const address = JSON.parse(currentOrder.deliveryAddress);
-                    return `${address.label} - ${address.street_address}, ${address.city}, ${address.state}`;
-                  } catch {
-                    return currentOrder.deliveryAddress;
-                  }
-                })()
-              : "No address provided"}
-          </Text>
-        </View>
-      </View>
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Order Items</Text>
-        {(currentOrder.orderItems || []).map((item, index) => (
-          <View key={index} style={styles.orderItem}>
-            <View style={styles.orderItemInfo}>
-              <Text style={styles.orderItemQuantity}>{item.quantity}x</Text>
-              <Text style={styles.orderItemName}>{item.name}</Text>
-            </View>
-            <Text style={styles.orderItemPrice}>
-              ${(item.price * item.quantity).toFixed(2)}
+        {/* Notification Card */}
+        <View style={styles.infoCard}>
+          <View style={styles.iconCircle}>
+            <Ionicons name="shield-checkmark" size={20} color={BrandColors.primary} />
+          </View>
+          <View style={styles.infoCardBody}>
+            <Text style={styles.notificationTitle}>
+              {t("orders.details.notification_title")}
+            </Text>
+            <Text style={styles.notificationDesc}>
+              {t("orders.details.notification_desc")}
             </Text>
           </View>
-        ))}
-        <View style={styles.totalContainer}>
-          <Text style={styles.totalLabel}>Total Amount</Text>
-          <Text style={styles.totalAmount}>
-            ${currentOrder.totalAmount.toFixed(2)}
-          </Text>
+          <View style={styles.notificationBell}>
+            <Ionicons name="notifications" size={20} color="#fff" />
+          </View>
         </View>
-      </View>
 
-      <TouchableOpacity style={styles.supportButton} onPress={handleSupport}>
-        <Ionicons name="call-outline" size={24} color="#FF4B2B" />
-        <Text style={styles.supportButtonText}>Contact Support</Text>
-      </TouchableOpacity>
-    </ScrollView>
+        {/* Bill Summary Card */}
+        <View style={[styles.infoCard, styles.billCard]}>
+          <View style={styles.billHeader}>
+            <Ionicons name="receipt-outline" size={18} color={BrandColors.primary} />
+            <Text style={styles.sectionLabel}>
+              {t("orders.details.bill_summary").toUpperCase()}
+            </Text>
+          </View>
+
+          <View style={styles.billRow}>
+            <Text style={styles.billRowLabel}>{t("orders.details.subtotal")}</Text>
+            <Text style={styles.billRowValue}>
+              {formatPrice(billSummary.subtotal, billSummary.currency)}
+            </Text>
+          </View>
+          <View style={styles.billRow}>
+            <Text style={styles.billRowLabel}>{t("orders.details.delivery_fee")}</Text>
+            <Text style={styles.billRowValue}>
+              {formatPrice(billSummary.deliveryFee, billSummary.currency)}
+            </Text>
+          </View>
+          {billSummary.serviceChargeAmount > 0 ? (
+            <View style={styles.billRow}>
+              <Text style={styles.billRowLabel}>{t("orders.details.service_charge")}</Text>
+              <Text style={styles.billRowValue}>
+                {formatPrice(billSummary.serviceChargeAmount, billSummary.currency)}
+              </Text>
+            </View>
+          ) : null}
+          {billSummary.taxAmount > 0 ? (
+            <View style={styles.billRow}>
+              <Text style={styles.billRowLabel}>{t("orders.details.tax")}</Text>
+              <Text style={styles.billRowValue}>
+                {formatPrice(billSummary.taxAmount, billSummary.currency)}
+              </Text>
+            </View>
+          ) : null}
+
+          <View style={styles.billDashedLine} />
+
+          <View style={styles.billTotalRow}>
+            <Text style={styles.billTotalLabel}>{t("orders.details.total_paid")}</Text>
+            <Text style={styles.billTotalValue}>
+              {formatPrice(billSummary.total, billSummary.currency)}
+            </Text>
+          </View>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
+
+const CARD_SURFACE = "#FFFBF8";
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#fff",
+    backgroundColor: "#FFFFFF",
   },
-  section: {
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: "#E5E7EB",
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#1F2937",
-    marginBottom: 12,
+  scrollView: {
+    flex: 1,
   },
   header: {
     flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 15,
+    backgroundColor: "#FFFFFF",
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: CARD_SURFACE,
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#EEE7D6",
+  },
+  headerTitleContainer: {
+    flex: 1,
+    alignItems: "center",
+  },
+  headerTitle: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#111827",
+  },
+  headerSubtitle: {
+    fontSize: 13,
+    color: "#6B7280",
+    marginTop: 2,
+  },
+  headerRight: {
+    width: 40,
+  },
+
+  // Status Card
+  statusCard: {
+    backgroundColor: CARD_SURFACE,
+    borderRadius: 24,
+    paddingVertical: 28,
+    paddingHorizontal: 20,
+    marginHorizontal: 20,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: "#EEE7D6",
+  },
+  statusIconContainer: {
+    alignItems: "center",
+    marginBottom: 18,
+  },
+  statusIconCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: "#FFF5F0",
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#FFEDD5",
+  },
+  statusIconCircleSuccess: {
+    backgroundColor: "#FFF7ED",
+    borderColor: "#FED7AA",
+  },
+  statusIconCircleCancelled: {
+    backgroundColor: "#FEF2F2",
+    borderColor: "#FECACA",
+  },
+  statusTitle: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#111827",
+    textAlign: "center",
+    marginBottom: 8,
+    letterSpacing: -0.3,
+  },
+  statusDesc: {
+    fontSize: 14,
+    color: "#6B7280",
+    textAlign: "center",
+    lineHeight: 21,
+    marginBottom: 28,
+    paddingHorizontal: 8,
+  },
+
+  // Timeline
+  timelineSection: {
+    paddingTop: 4,
+  },
+  timelineTrackWrap: {
+    position: "relative",
+    height: 40,
+    justifyContent: "center",
+    marginBottom: 10,
+    paddingHorizontal: 4,
+  },
+  timelineTrackBg: {
+    position: "absolute",
+    left: "10%",
+    right: "10%",
+    top: 18,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "#E5E7EB",
+  },
+  timelineTrackFill: {
+    position: "absolute",
+    left: "10%",
+    top: 18,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: BrandColors.primary,
+    maxWidth: "80%",
+  },
+  timelineIconsRow: {
+    flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: "#EAEAEA",
+    zIndex: 1,
   },
-  orderId: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#1A1A1A",
-  },
-  orderDate: {
-    fontSize: 14,
-    color: "#666666",
-    marginTop: 4,
-  },
-  statusBadge: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-  },
-  statusText: {
-    color: "#fff",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  progressSection: {
-    padding: 24,
+  timelineStep: {
+    flex: 1,
     alignItems: "center",
   },
-  statusLabel: {
-    fontSize: 16,
-    fontWeight: "500",
-    color: "#4A90E2",
-    marginTop: 12,
-    textTransform: "uppercase",
-  },
-  timeline: {
-    paddingHorizontal: 24,
-    paddingTop: 8,
-  },
-  timelineItem: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    marginBottom: 5,
-  },
-  timelineLeft: {
-    alignItems: "center",
-    marginRight: 16,
-  },
-  timelineDot: {
+  timelineIcon: {
     width: 32,
     height: 32,
     borderRadius: 16,
     backgroundColor: "#F3F4F6",
     justifyContent: "center",
     alignItems: "center",
-    marginBottom: 8,
+    borderWidth: 2,
+    borderColor: "#fff",
   },
-  timelineDotActive: {
-    backgroundColor: "#FF4B2B",
+  timelineIconActive: {
+    backgroundColor: BrandColors.primary,
   },
-  timelineDotCompleted: {
-    backgroundColor: "#10B981",
+  timelineIconCurrent: {
+    backgroundColor: BrandColors.primary,
+    borderColor: "#FFEDD5",
+    transform: [{ scale: 1.08 }],
   },
-  timelineLine: {
-    width: 2,
-    height: 40,
-    backgroundColor: "#EAEAEA",
+  timelineLabelsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 4,
   },
-  timelineLineCompleted: {
-    backgroundColor: "#10B981",
+  timelineLabelWrap: {
+    flex: 1,
+    alignItems: "center",
+    paddingHorizontal: 2,
+    minHeight: 32,
   },
   timelineLabel: {
-    fontSize: 14,
-    color: "#666666",
-    marginTop: 6,
-  },
-  updateText: {
-    fontSize: 12,
-    color: "#6B7280",
-    marginTop: 4,
+    fontSize: 10,
+    color: "#9CA3AF",
+    fontWeight: "500",
+    textAlign: "center",
+    lineHeight: 13,
   },
   timelineLabelActive: {
-    color: "#1A1A1A",
-    fontWeight: "500",
+    color: "#374151",
+    fontWeight: "600",
   },
-  restaurantInfo: {
+  timelineLabelCurrent: {
+    color: BrandColors.primary,
+    fontWeight: "700",
+  },
+
+  // Delivery Card
+  deliveryCard: {
+    borderRadius: 24,
+    marginHorizontal: 20,
+    marginTop: 16,
+    paddingVertical: 28,
+    paddingHorizontal: 24,
+    overflow: "hidden",
+  },
+  deliveryCardDecor: {
+    position: "absolute",
+    right: -20,
+    bottom: -24,
+    opacity: 1,
+  },
+  deliveryCardContent: {
+    zIndex: 1,
+  },
+  deliveryLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "rgba(255, 255, 255, 0.92)",
+    letterSpacing: 1.4,
+    marginBottom: 10,
+  },
+  deliveryTime: {
+    fontSize: 36,
+    fontWeight: "800",
+    color: "#fff",
+    letterSpacing: -0.5,
+    marginBottom: 18,
+  },
+  priorityBadge: {
     flexDirection: "row",
     alignItems: "center",
+    backgroundColor: "rgba(255, 255, 255, 0.22)",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    alignSelf: "flex-start",
+    marginBottom: 22,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.28)",
+    gap: 6,
+  },
+  priorityText: {
+    fontSize: 12,
+    color: "#fff",
+    fontWeight: "600",
+  },
+  viewDetailsButton: {
+    backgroundColor: "#fff",
+    borderRadius: 28,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
+  viewDetailsText: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: BrandColors.primary,
+  },
+
+  // Details Card
+  detailsCard: {
+    backgroundColor: CARD_SURFACE,
+    borderRadius: 20,
+    marginHorizontal: 20,
+    marginTop: 12,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: "#EEE7D6",
+  },
+  detailRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 12,
+  },
+  detailName: {
+    fontSize: 14,
+    color: "#6B7280",
+  },
+  detailPrice: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#111827",
+  },
+  detailDivider: {
+    height: 1,
+    backgroundColor: "#F3F4F6",
+    marginVertical: 12,
+  },
+  detailTotalLabel: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#111827",
+  },
+  detailTotalValue: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: BrandColors.primary,
+  },
+
+  // Info cards (restaurant, address, notification, bill)
+  infoCard: {
+    backgroundColor: CARD_SURFACE,
+    borderRadius: 20,
+    marginHorizontal: 20,
+    marginTop: 16,
+    padding: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#EEE7D6",
+  },
+  restaurantLogo: {
+    width: 64,
+    height: 64,
+    borderRadius: 16,
+    backgroundColor: BrandColors.gray[100],
+  },
+  restaurantInfo: {
+    flex: 1,
+    marginLeft: 14,
+    marginRight: 8,
   },
   restaurantName: {
-    fontSize: 16,
-    color: "#4B5563",
-    marginLeft: 8,
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#111827",
+    marginBottom: 6,
   },
-  addressContainer: {
+  restaurantMetaRow: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 4,
   },
-  loadingContainer: {
-    flex: 1,
+  restaurantMetaText: {
+    fontSize: 14,
+    color: "#6B7280",
+  },
+  restaurantMetaDot: {
+    fontSize: 14,
+    color: "#9CA3AF",
+    marginHorizontal: 2,
+  },
+  callButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "#FFF5F0",
     justifyContent: "center",
     alignItems: "center",
   },
-  address: {
-    flex: 1,
-    fontSize: 16,
-    color: "#4B5563",
-    marginLeft: 8,
+  iconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "#FFF5F0",
+    justifyContent: "center",
+    alignItems: "center",
   },
-  orderItem: {
+  infoCardBody: {
+    flex: 1,
+    marginLeft: 14,
+    marginRight: 8,
+  },
+  sectionLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#A8A29E",
+    letterSpacing: 1,
+    marginBottom: 6,
+  },
+  addressLine: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#111827",
+    lineHeight: 22,
+  },
+  notificationTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#111827",
+    marginBottom: 4,
+  },
+  notificationDesc: {
+    fontSize: 14,
+    color: "#6B7280",
+    lineHeight: 20,
+  },
+  notificationBell: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: BrandColors.primary,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  billCard: {
+    flexDirection: "column",
+    alignItems: "stretch",
+  },
+  billHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 16,
+  },
+  billRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 12,
   },
-  orderItemInfo: {
-    flexDirection: "row",
-    alignItems: "center",
+  billRowLabel: {
+    fontSize: 14,
+    color: "#6B7280",
   },
-  orderItemQuantity: {
-    fontSize: 16,
+  billRowValue: {
+    fontSize: 14,
     fontWeight: "600",
-    color: "#FF4B2B",
-    marginRight: 8,
+    color: "#111827",
   },
-  orderItemName: {
-    fontSize: 16,
-    color: "#4B5563",
+  billDashedLine: {
+    borderBottomWidth: 1,
+    borderStyle: "dashed",
+    borderColor: "#E5E7EB",
+    marginVertical: 4,
+    marginBottom: 16,
   },
-  orderItemPrice: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#1F2937",
-  },
-  totalContainer: {
+  billTotalRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginTop: 16,
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: "#E5E7EB",
   },
-  totalLabel: {
+  billTotalLabel: {
     fontSize: 16,
-    fontWeight: "600",
-    color: "#1F2937",
+    fontWeight: "700",
+    color: "#111827",
   },
-  totalAmount: {
-    fontSize: 18,
-    fontWeight: "bold",
-    color: "#FF4B2B",
-  },
-  supportButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 16,
-    marginHorizontal: 16,
-    marginVertical: 24,
-    backgroundColor: "#FFF1F0",
-    borderRadius: 12,
-  },
-  supportButtonText: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#FF4B2B",
-    marginLeft: 8,
+  billTotalValue: {
+    fontSize: 20,
+    fontWeight: "800",
+    color: BrandColors.primary,
   },
 });
+
 export default OrderDetailsScreen;

@@ -1,8 +1,12 @@
 import React, { useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, Image, Animated } from 'react-native';
+import { View, Text, Image, Animated } from 'react-native';
+import { styles } from './SplashScreen.styles';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useTranslation } from 'react-i18next';
+import { Ionicons } from '@expo/vector-icons';
 
 export function SplashScreenComponent() {
+  const { t } = useTranslation();
   const fadeAnim = new Animated.Value(0);
   const slideAnim = new Animated.Value(50);
 
@@ -39,81 +43,26 @@ export function SplashScreenComponent() {
           },
         ]}
       >
-        <Text style={styles.title}>Fiesta</Text>
-        <Text style={styles.subtitle}>Tasty & Healthy</Text>
+        <Text style={styles.title}>{t('splash.title')}</Text>
+        <Text style={styles.subtitle}>{t('splash.subtitle')}</Text>
         
         <View style={styles.imageContainer}>
           <Image
-            source={{ uri: 'https://marketplace.canva.com/EAFaFUz4aKo/2/0/1600w/canva-yellow-abstract-cooking-fire-free-logo-JmYWTjUsE-Q.jpg' }}
-
+            source={require('../../assets/fiestaa-logo.png')}
             style={styles.foodImage}
             resizeMode="contain"
           />
           <View style={styles.decorationLeft}>
-            <Text style={styles.decorationEmoji}>🌿</Text>
+            <Ionicons name="leaf" size={24} color="#22C55E" />
           </View>
           <View style={styles.decorationRight}>
-            <Text style={styles.decorationEmoji}>🍋</Text>
+            <Ionicons name="sunny" size={24} color="#F59E0B" />
           </View>
           <View style={styles.decorationBottom}>
-            <Text style={styles.decorationEmoji}>🌶️</Text>
+            <Ionicons name="flame" size={24} color="#EF4444" />
           </View>
         </View>
       </Animated.View>
     </LinearGradient>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  content: {
-    alignItems: 'center',
-    width: '100%',
-  },
-  title: {
-    fontSize: 48,
-    fontWeight: 'bold',
-    color: '#000000',
-    marginBottom: 8,
-    fontFamily: 'System',
-  },
-  subtitle: {
-    fontSize: 18,
-    color: '#000000',
-    opacity: 0.9,
-    marginBottom: 40,
-    fontFamily: 'System',
-  },
-  imageContainer: {
-    width: '80%',
-    aspectRatio: 1,
-    position: 'relative',
-  },
-  foodImage: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 20,
-  },
-  decorationLeft: {
-    position: 'absolute',
-    left: -20,
-    top: '50%',
-  },
-  decorationRight: {
-    position: 'absolute',
-    right: -20,
-    top: '30%',
-  },
-  decorationBottom: {
-    position: 'absolute',
-    bottom: -20,
-    left: '40%',
-  },
-  decorationEmoji: {
-    fontSize: 24,
-  },
-});

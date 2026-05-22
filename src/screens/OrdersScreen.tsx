@@ -8,41 +8,55 @@ import {
   RefreshControl,
   Alert,
   Animated,
-  Dimensions,
   TextInput,
   StyleProp,
   ViewStyle,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { styles, searchBarStyles } from "./OrdersScreen.styles";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
-import { Ionicons } from "@expo/vector-icons";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import { Image } from "react-native";
+import { formatPrice } from "../utils/currency";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
+import { useCart } from "../hooks/useCart";
+import { useTranslation } from "react-i18next";
+import Preloader from "../components/Preloader";
+import { Colors as BrandColors } from "../constants/Colors";
+import { getUserOrders } from "../lib/api";
 
-const { width } = Dimensions.get("window");
 
 interface OrderItem {
   id: string;
   name: string;
   price: number;
   quantity: number;
+  menuItem?: {
+    image: string | null;
+  };
 }
 
 interface Restaurant {
   id: string;
   name: string;
+  deliveryCharges?: number;
+  currency?: string;
+  coverImage?: string;
 }
 
 export interface Order {
   id: string;
   userId: string;
   status:
-    | "PENDING"
-    | "CONFIRMED"
-    | "PREPARING"
-    | "OUT_FOR_DELIVERY"
-    | "DELIVERED"
-    | "CANCELLED";
+  | "PENDING"
+  | "CONFIRMED"
+  | "PREPARING"
+  | "READY_FOR_PICKUP"
+  | "PICKUP_CONFIRMED"
+  | "OUT_FOR_DELIVERY"
+  | "DELIVERED"
+  | "CANCELLED";
   totalAmount: number;
   deliveryAddress: string;
   driverId: string | null;
@@ -69,6 +83,7 @@ const SearchBar = memo(
     searchQuery: string;
     onChangeText: (text: string) => void;
   }) => {
+    const { t } = useTranslation();
     return (
       <View style={searchBarStyles.container}>
         <Ionicons
@@ -79,35 +94,20 @@ const SearchBar = memo(
         />
         <TextInput
           style={searchBarStyles.input}
-          placeholder="Search orders by item name"
+          placeholder={t('orders.search_placeholder')}
           placeholderTextColor="#6B7280"
           value={searchQuery}
           onChangeText={onChangeText}
+          underlineColorAndroid="transparent"
           returnKeyType="search"
+          multiline={false}
+          numberOfLines={1}
         />
       </View>
     );
   }
 );
 
-const searchBarStyles = StyleSheet.create({
-  container: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgb(255,255,255)",
-    borderRadius: 12,
-    paddingHorizontal: 12,
-  },
-  searchIcon: {
-    marginRight: 8,
-  },
-  input: {
-    flex: 1,
-    paddingVertical: 12,
-    fontSize: 16,
-    color: "#000",
-  },
-});
 
 // ----------------------
 // Debounce Hook
@@ -135,6 +135,32 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
   const [isSearching, setIsSearching] = useState(false);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const scrollY = new Animated.Value(0);
+  const insets = useSafeAreaInsets();
+
+  // Hook from useCart
+  const addToCart = useCart((state) => state.addToCart);
+  const { t, i18n } = useTranslation();
+
+  const handleReorder = (order: Order) => {
+    order.orderItems.forEach((item) => {
+      addToCart({
+        id: (item as any).menuItemId || item.id,
+        restaurantId: order.restaurant?.id || "",
+        restaurantName: order.restaurant?.name || t('orders.ref_prefix') + order.id,
+        restaurantCurrency: order.restaurant?.currency,
+        name: item.name,
+        price: item.price,
+        quantity: item.quantity,
+        image: item.menuItem?.image || undefined,
+        deliveryCharges: order.restaurant?.deliveryCharges,
+        isTaxIncluded: (order.restaurant as any)?.isTaxIncluded,
+        serviceChargeRate: (order.restaurant as any)?.serviceChargeRate,
+        taxRate: (order.restaurant as any)?.taxRate
+      });
+    });
+    navigation.navigate("CartTab");
+  };
+
 
   // ----------------------
   // Fetch Orders
@@ -153,99 +179,34 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
         } = await supabase.auth.getUser();
         if (!user) throw new Error("No user found");
 
-        let query;
+        console.log("DEBUG: Fetching orders through Vercel API for user ID:", user.id);
+        
+        // Use the centralized Vercel API for order history (limit to 20)
+        const data = await getUserOrders(user.id, undefined, 20);
+        
+        
+        // Ensure data is an array
+        const allOrders = Array.isArray(data) ? data : (data?.data || []);
+
+        // Apply client-side search filtering if a search term is provided
+        let filteredOrders = allOrders;
         if (searchTerm) {
-          query = supabase
-            .from("Order")
-            .select(
-              `
-              id,
-              "userId",
-              status,
-              "totalAmount",
-              "deliveryAddress",
-              "driverId",
-              "assignedAt",
-              "pickedUpAt",
-              "deliveredAt",
-              "estimatedTime",
-              "actualTime",
-              "driverRating",
-              "createdAt",
-              "updatedAt",
-              orderItems:OrderItem!inner(
-                 id,
-                 "orderId",
-                 "menuItemId",
-                 quantity,
-                 options,
-                 price,
-                 name,
-                 "createdAt",
-                 "updatedAt"
-              ),
-              restaurant:Restaurant(
-                 id,
-                 name
-              )
-            `
-            )
-            .eq("userId", user.id)
-            .ilike("orderItems.name", `%${searchTerm}%`)
-            .order("createdAt", { ascending: false });
-        } else {
-          query = supabase
-            .from("Order")
-            .select(
-              `
-              id,
-              "userId",
-              status,
-              "totalAmount",
-              "deliveryAddress",
-              "driverId",
-              "assignedAt",
-              "pickedUpAt",
-              "deliveredAt",
-              "estimatedTime",
-              "actualTime",
-              "driverRating",
-              "createdAt",
-              "updatedAt",
-              orderItems:OrderItem(
-                 id,
-                 "orderId",
-                 "menuItemId",
-                 quantity,
-                 options,
-                 price,
-                 name,
-                 "createdAt",
-                 "updatedAt"
-              ),
-              restaurant:Restaurant(
-                 id,
-                 name
-              )
-            `
-            )
-            .eq("userId", user.id)
-            .order("createdAt", { ascending: false });
+          filteredOrders = allOrders.filter((order: any) => 
+            (order.restaurant?.name || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
+            order.orderItems?.some((item: any) => item.name.toLowerCase().includes(searchTerm.toLowerCase()))
+          );
         }
 
-        const { data, error } = await query;
-        if (error) throw error;
-
-        // Ensure orderItems is an array for each order.
-        const formattedOrders = data.map((order: any) => ({
+        // Map data to match local Order interface if necessary and limit to 20
+        const formattedOrders = filteredOrders.map((order: any) => ({
           ...order,
           orderItems: Array.isArray(order.orderItems) ? order.orderItems : [],
-        }));
-
+        })).slice(0, 20);
+        
         setOrders(formattedOrders);
       } catch (error) {
-        console.error("Error fetching orders:", error);
-        Alert.alert("Error", "Failed to load orders");
+        console.error("Error fetching orders from API:", error);
+        Alert.alert(t('common.error'), t('orders.load_error'));
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -253,7 +214,7 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
         setIsInitialLoad(false);
       }
     },
-    [isInitialLoad]
+    [isInitialLoad, t]
   );
 
   // Fetch orders when the debounced search term changes.
@@ -270,7 +231,7 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
   // Realtime Subscription for Orders
   // ----------------------
   useEffect(() => {
-    let subscription;
+    let subscription: ReturnType<typeof supabase.channel> | null = null;
     async function setupRealtime() {
       const {
         data: { user },
@@ -314,13 +275,15 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
       case "CONFIRMED":
         return "#60A5FA";
       case "PREPARING":
+      case "READY_FOR_PICKUP":
+      case "PICKUP_CONFIRMED":
         return "#818CF8";
       case "OUT_FOR_DELIVERY":
         return "#34D399";
       case "DELIVERED":
         return "#10B981";
       case "CANCELLED":
-        return "#EF4444";
+        return BrandColors.primary;
       default:
         return "#6B7280";
     }
@@ -333,6 +296,8 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
       case "CONFIRMED":
         return "checkmark-circle-outline";
       case "PREPARING":
+      case "READY_FOR_PICKUP":
+      case "PICKUP_CONFIRMED":
         return "restaurant-outline";
       case "OUT_FOR_DELIVERY":
         return "bicycle-outline";
@@ -345,14 +310,21 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
     }
   };
   const formatStatus = (status: string) => {
-    return status
-      .split("_")
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-      .join(" ");
+    const fallback: Record<string, string> = {
+      PENDING: 'Order Placed',
+      CONFIRMED: 'Order Confirmed',
+      PREPARING: 'Preparing',
+      READY_FOR_PICKUP: 'Ready for Pickup',
+      PICKUP_CONFIRMED: 'Pickup Confirmed',
+      OUT_FOR_DELIVERY: 'Out For Delivery',
+      DELIVERED: 'Delivered',
+      CANCELLED: 'Cancelled',
+    };
+    return t(`orders.statuses.${status.toLowerCase()}.label` as any, fallback[status] || status);
   };
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
-    return date.toLocaleDateString("en-US", {
+    return date.toLocaleDateString(i18n.language, {
       year: "numeric",
       month: "short",
       day: "numeric",
@@ -365,48 +337,125 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
     <TouchableOpacity
       style={styles.orderCard}
       onPress={() => navigation.navigate("OrderDetails", { order: item })}
+      activeOpacity={0.7}
     >
-      <View style={styles.orderHeader}>
-        <View>
-          <Text style={styles.restaurantName}>
-            {item.restaurant ? item.restaurant.name : "Restaurant"}
-          </Text>
-          <Text style={styles.orderDate}>{formatDate(item.createdAt)}</Text>
+      {/* Restaurant Header with Icon and Status */}
+      <View style={styles.cardHeader}>
+        <View style={styles.restaurantIconContainer}>
+          {(item.restaurant?.coverImage && item.restaurant.coverImage.trim() !== "") || (item.orderItems?.[0]?.menuItem?.image) ? (
+            <Image
+              source={{ uri: item.restaurant?.coverImage && item.restaurant.coverImage.trim() !== "" ? item.restaurant.coverImage : item.orderItems[0].menuItem?.image || "" }}
+              style={{ width: "100%", height: "100%", borderRadius: 16 }}
+              resizeMode="cover"
+              onError={(e) => console.log("Image load error:", e.nativeEvent.error)}
+            />
+          ) : (
+            <Ionicons name="restaurant" size={24} color="#9CA3AF" />
+          )}
         </View>
-        <View
-          style={[
-            styles.statusBadge,
-            { backgroundColor: getStatusColor(item.status) },
-          ]}
-        >
-          <Ionicons name={getStatusIcon(item.status)} size={16} color="#fff" />
-          <Text style={styles.statusText}>{formatStatus(item.status)}</Text>
+        <View style={styles.headerContent}>
+          <View style={styles.restaurantRow}>
+            <Text style={styles.restaurantName} numberOfLines={1} ellipsizeMode="tail">
+              {item.restaurant ? item.restaurant.name : t('orders.restaurant_fallback')}
+            </Text>
+            <View
+              style={[
+                styles.statusBadge,
+                {
+                  backgroundColor: item.status === "PENDING"
+                    ? "#FFF5F0"
+                    : item.status === "OUT_FOR_DELIVERY"
+                      ? "#EFF6FF"
+                      : item.status === "DELIVERED"
+                        ? "#F0FDF4"
+                        : (item.status === "CONFIRMED" || item.status === "PREPARING" || item.status === "READY_FOR_PICKUP" || item.status === "PICKUP_CONFIRMED")
+                          ? "#EEF2FF"
+                          : "#FEF2F2"
+                },
+              ]}
+            >
+              <Text style={[
+                styles.statusText,
+                {
+                  color: item.status === "PENDING"
+                    ? BrandColors.primary
+                    : item.status === "OUT_FOR_DELIVERY"
+                      ? "#2563EB"
+                      : item.status === "DELIVERED"
+                        ? "#16A34A"
+                        : (item.status === "CONFIRMED" || item.status === "PREPARING" || item.status === "READY_FOR_PICKUP" || item.status === "PICKUP_CONFIRMED")
+                          ? "#4F46E5"
+                          : "#DC2626"
+                }
+              ]}>
+                {formatStatus(item.status)}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.orderMetaRow}>
+            <Ionicons name="calendar-outline" size={14} color="#9CA3AF" />
+            <Text style={styles.orderDate}>{formatDate(item.createdAt)}</Text>
+          </View>
+          <View style={styles.orderMetaRow}>
+            <Ionicons name="location-outline" size={14} color="#9CA3AF" />
+            <Text style={styles.addressText} numberOfLines={1}>
+              {item.deliveryAddress}
+            </Text>
+          </View>
+          <View style={styles.orderMetaRow}>
+            <Ionicons name="wallet-outline" size={14} color="#9CA3AF" />
+            <Text style={styles.paymentText}>{t('orders.payment_cod')}</Text>
+          </View>
         </View>
       </View>
 
-      <View style={styles.orderItems}>
-        {(item.orderItems || []).slice(0, 2).map((orderItem, index) => (
-          <Text key={index} style={styles.orderItemText}>
-            {orderItem.quantity}x {orderItem.name}
-          </Text>
+      {/* Dashed Divider */}
+      <View style={styles.dashedDivider} />
+
+      {/* Order Items Section */}
+      <View style={styles.orderItemsSection}>
+        <Text style={styles.orderItemsTitle}>{t('orders.order_items')}</Text>
+        {(item.orderItems || []).map((orderItem, index) => (
+          <View key={`item-${orderItem.id || index}`} style={styles.orderItemContainer}>
+            <View style={styles.orderItemRow}>
+              <View style={styles.orderItemNameContainer}>
+                <Text style={styles.orderItemQuantity}>{orderItem.quantity}×</Text>
+                <Text style={styles.orderItemName} numberOfLines={1} ellipsizeMode="tail">
+                  {orderItem.name}
+                </Text>
+              </View>
+              <Text style={styles.orderItemPrice}>
+                {formatPrice(orderItem.price * orderItem.quantity, item.restaurant?.currency)}
+              </Text>
+            </View>
+          </View>
         ))}
-        {item.orderItems.length > 2 && (
-          <Text style={styles.orderItemText}>
-            +{item.orderItems.length - 2} more items
-          </Text>
-        )}
       </View>
 
-      <View style={styles.orderFooter}>
-        <Text style={styles.totalItems}>
-          {item.orderItems.reduce(
-            (sum, orderItem) => sum + orderItem.quantity,
-            0
-          )}{" "}
-          items
-        </Text>
-        <Text style={styles.totalAmount}>${item.totalAmount.toFixed(2)}</Text>
+      {/* Total Amount Container */}
+      <View style={styles.totalAmountContainer}>
+        <Text style={styles.totalAmountLabel}>{t('orders.total_amount')}</Text>
+        <View style={styles.totalAmountRightContent}>
+          <Text style={styles.totalAmount}>{formatPrice(item.totalAmount, item.restaurant?.currency)}</Text>
+          {item.restaurant?.deliveryCharges !== undefined && (
+            <Text style={styles.deliveryIncludedText}>
+              {t('orders.incl_delivery', { price: formatPrice(item.restaurant.deliveryCharges, item.restaurant.currency) })}
+            </Text>
+          )}
+        </View>
       </View>
+
+      {/* Reorder Button */}
+      <TouchableOpacity
+        style={styles.reorderButton}
+        onPress={(e) => {
+          e.stopPropagation();
+          handleReorder(item);
+        }}
+      >
+        <Ionicons name="refresh-outline" size={18} color="#fff" />
+        <Text style={styles.reorderButtonText}>{t('orders.reorder_items')}</Text>
+      </TouchableOpacity>
     </TouchableOpacity>
   );
 
@@ -415,7 +464,7 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
   // ----------------------
   const headerHeight = scrollY.interpolate({
     inputRange: [0, 100],
-    outputRange: [200, 160],
+    outputRange: [160, 130],
     extrapolate: "clamp",
   });
 
@@ -424,41 +473,67 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
   // ----------------------
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#FF6B6B" />
-      </View>
+      <Preloader fullScreen={true} />
     );
   }
 
+
   return (
-    <SafeAreaView style={styles.container}>
-      {/* Header with gradient and blur matching the SearchScreen */}
-      <Animated.View style={[styles.header, { height: 200 }]}>
-        <LinearGradient
-          colors={["#FF6B6B", "#FF8E53"]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={StyleSheet.absoluteFill}
-        />
-        <BlurView intensity={20} style={StyleSheet.absoluteFill} />
-        <Text style={styles.title}>My Orders</Text>
-        <SearchBar searchQuery={searchQuery} onChangeText={setSearchQuery} />
-      </Animated.View>
+    <View style={styles.container}>
+      {/* Premium Your Orders Header */}
+      <View style={[styles.header, { 
+        height: 185 + insets.top, 
+        paddingTop: insets.top + 12,
+        backgroundColor: '#FFF7ED',
+        borderBottomLeftRadius: 40,
+        borderBottomRightRadius: 40,
+        overflow: 'hidden'
+      }]}>
+        
+        {/* Decorative Background Elements */}
+        <View style={{ position: 'absolute', right: 10, bottom: 10, opacity: 0.1 }}>
+          <Ionicons name="bag-handle-outline" size={110} color="#EA580C" />
+        </View>
+
+        <View style={{ paddingHorizontal: 20 }}>
+          {/* Header Icon */}
+          <View style={{
+            width: 40,
+            height: 40,
+            borderRadius: 10,
+            backgroundColor: '#FFedd5',
+            justifyContent: 'center',
+            alignItems: 'center',
+            marginBottom: 12,
+            borderWidth: 1,
+            borderColor: '#FED7AA'
+          }}>
+            <MaterialCommunityIcons name="shopping" size={20} color="#EA580C" />
+          </View>
+
+          <Text style={styles.heroTitle}>
+            {t("orders.your_orders", { defaultValue: "Your Orders" })}
+          </Text>
+          <Text style={styles.heroSubtitle}>
+            {t("orders.reorder_fav", { defaultValue: "Reorder your favorites anytime" })}
+          </Text>
+        </View>
+      </View>
 
       {/* Orders list */}
       <Animated.FlatList
         data={orders}
         renderItem={renderOrderItem}
         keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.listContainer}
-        // refreshControl={
-        //   <RefreshControl
-        //     refreshing={refreshing}
-        //     onRefresh={onRefresh}
-        //     colors={["#FF6B6B"]}
-        //     tintColor="#FF6B6B"
-        //   />
-        // }
+        contentContainerStyle={[styles.listContainer, { paddingBottom: 60 + insets.bottom, paddingTop: 20 }]}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            colors={[BrandColors.primary]}
+            tintColor={BrandColors.primary}
+          />
+        }
         onScroll={Animated.event(
           [{ nativeEvent: { contentOffset: { y: scrollY } } }],
           { useNativeDriver: false }
@@ -467,147 +542,32 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Ionicons name="receipt-outline" size={64} color="#9CA3AF" />
-            <Text style={styles.emptyText}>No orders found</Text>
+            <Text style={styles.emptyText}>{t('orders.no_orders')}</Text>
             <TouchableOpacity
               style={styles.browseButton}
-              onPress={() => navigation.navigate("Restaurants")}
+              activeOpacity={1}
+              onPress={() => navigation.navigate("HomeTab", { screen: "Restaurants" })}
             >
-              <Text style={styles.browseButtonText}>Browse Restaurants</Text>
+              <Text style={styles.browseButtonText}>{t('orders.browse_restaurants')}</Text>
             </TouchableOpacity>
           </View>
         }
-        
+
         ListHeaderComponent={
           <View style={styles.loadingContainer}>
             {isSearching && !refreshing && (
-             <ActivityIndicator size="small" color="#FF6B6B" />
+              <ActivityIndicator size="small" color={BrandColors.primary} />
             )}
           </View>
         }
       />
-    </SafeAreaView>
+    </View>
   );
 }
 
 // ----------------------
 // Styles
 // ----------------------
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#fff", // Matches the SearchScreen background
-    paddingTop: -35,
-  },
-  header: {
-    justifyContent: "flex-end",
-    paddingHorizontal: 16,
-    paddingBottom: 16,
-    overflow: "hidden",
-  },
-  title: {
-    fontSize: 32,
-    fontWeight: "bold",
-    color: "#000",
-    marginBottom: 16,
-  },
-  listContainer: {
-    padding: 16,
-    paddingTop: 16,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "#fff",
-  },
-  orderCard: {
-    backgroundColor: "#fff",
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  orderHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    marginBottom: 12,
-  },
-  restaurantName: {
-    fontSize: 18,
-    fontWeight: "bold",
-    color: "#1F2937",
-  },
-  orderDate: {
-    fontSize: 14,
-    color: "#6B7280",
-    marginTop: 4,
-  },
-  statusBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  statusText: {
-    color: "#fff",
-    fontSize: 12,
-    fontWeight: "600",
-    marginLeft: 4,
-  },
-  orderItems: {
-    marginBottom: 12,
-  },
-  orderItemText: {
-    fontSize: 14,
-    color: "#4B5563",
-    marginBottom: 4,
-  },
-  orderFooter: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    borderTopWidth: 1,
-    borderTopColor: "#E5E7EB",
-    paddingTop: 12,
-  },
-  totalItems: {
-    fontSize: 14,
-    color: "#6B7280",
-  },
-  totalAmount: {
-    fontSize: 18,
-    fontWeight: "bold",
-    color: "#FF4B2B",
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 20,
-  },
-  emptyText: {
-    fontSize: 18,
-    color: "#4B5563",
-    marginTop: 20,
-    marginBottom: 24,
-  },
-  browseButton: {
-    backgroundColor: "#FF4B2B",
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
-  },
-  browseButtonText: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "bold",
-  },
-});
 
 export default OrdersScreen;
+
