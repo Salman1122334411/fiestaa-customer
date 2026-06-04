@@ -28,6 +28,9 @@ interface OrderItem {
   price: number;
   quantity: number;
   options?: string;
+  menuItem?: {
+    image: string | null;
+  };
 }
 
 interface RestaurantDetails {
@@ -304,7 +307,7 @@ export function OrderDetailsScreen({ route, navigation }: Props) {
 
       <ScrollView
         style={styles.scrollView}
-        contentContainerStyle={{ paddingBottom: 32 + insets.bottom }}
+        contentContainerStyle={{ paddingBottom: 30 + insets.bottom }}
         showsVerticalScrollIndicator={false}
       >
         {/* Status Card */}
@@ -429,13 +432,40 @@ export function OrderDetailsScreen({ route, navigation }: Props) {
             </TouchableOpacity>
           </View>
         </LinearGradient>
-
         {/* Order Details (Collapsible) */}
         {showDetails && (
           <View style={styles.detailsCard}>
             {(currentOrder.orderItems || []).map((item, idx) => (
-              <View key={idx} style={styles.detailRow}>
-                <Text style={styles.detailName}>{item.quantity}x {item.name}</Text>
+              <View key={idx} style={[styles.detailRow, { alignItems: 'center' }]}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 16 }}>
+                  <Image
+                    source={item.menuItem?.image ? { uri: item.menuItem.image } : require('../../assets/placeholder.png')}
+                    style={{ width: 44, height: 44, borderRadius: 12, marginRight: 12, backgroundColor: '#F3F4F6' }}
+                    resizeMode="cover"
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.detailName, { color: '#111827', fontWeight: '700', fontSize: 14 }]} numberOfLines={2}>
+                      {item.quantity}x {item.name}
+                    </Text>
+                    {item.options ? (
+                      <Text style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
+                        {(() => {
+                          try {
+                            const parsed = JSON.parse(item.options);
+                            if (Array.isArray(parsed)) {
+                              return parsed.map((opt: any) => opt.name || opt).join(", ");
+                            } else if (typeof parsed === 'object' && parsed !== null) {
+                              return Object.values(parsed).join(", ");
+                            }
+                            return item.options;
+                          } catch {
+                            return item.options;
+                          }
+                        })()}
+                      </Text>
+                    ) : null}
+                  </View>
+                </View>
                 <Text style={styles.detailPrice}>{formatPrice(item.price * item.quantity, currentOrder.restaurant?.currency)}</Text>
               </View>
             ))}
@@ -446,7 +476,6 @@ export function OrderDetailsScreen({ route, navigation }: Props) {
             </View>
           </View>
         )}
-
         {/* Restaurant Card */}
         <View style={styles.infoCard}>
           <Image
@@ -614,14 +643,19 @@ const styles = StyleSheet.create({
 
   // Status Card
   statusCard: {
-    backgroundColor: CARD_SURFACE,
+    backgroundColor: "#FFFFFF",
     borderRadius: 24,
     paddingVertical: 28,
     paddingHorizontal: 20,
     marginHorizontal: 20,
     marginTop: 10,
     borderWidth: 1,
-    borderColor: "#EEE7D6",
+    borderColor: "#F3F4F6",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
   },
   statusIconContainer: {
     alignItems: "center",
@@ -646,19 +680,19 @@ const styles = StyleSheet.create({
     borderColor: "#FECACA",
   },
   statusTitle: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: "800",
     color: "#111827",
     textAlign: "center",
-    marginBottom: 8,
+    marginBottom: 6,
     letterSpacing: -0.3,
   },
   statusDesc: {
-    fontSize: 14,
+    fontSize: 12,
     color: "#6B7280",
     textAlign: "center",
-    lineHeight: 21,
-    marginBottom: 28,
+    lineHeight: 18,
+    marginBottom: 24,
     paddingHorizontal: 8,
   },
 
@@ -815,13 +849,18 @@ const styles = StyleSheet.create({
 
   // Details Card
   detailsCard: {
-    backgroundColor: CARD_SURFACE,
+    backgroundColor: "#FFFFFF",
     borderRadius: 20,
     marginHorizontal: 20,
     marginTop: 12,
     padding: 20,
     borderWidth: 1,
-    borderColor: "#EEE7D6",
+    borderColor: "#F3F4F6",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
   },
   detailRow: {
     flexDirection: "row",
@@ -855,7 +894,7 @@ const styles = StyleSheet.create({
 
   // Info cards (restaurant, address, notification, bill)
   infoCard: {
-    backgroundColor: CARD_SURFACE,
+    backgroundColor: "#FFFFFF",
     borderRadius: 20,
     marginHorizontal: 20,
     marginTop: 16,
@@ -863,7 +902,12 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     borderWidth: 1,
-    borderColor: "#EEE7D6",
+    borderColor: "#F3F4F6",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
   },
   restaurantLogo: {
     width: 64,
@@ -877,10 +921,10 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   restaurantName: {
-    fontSize: 18,
+    fontSize: 15,
     fontWeight: "700",
     color: "#111827",
-    marginBottom: 6,
+    marginBottom: 4,
   },
   restaurantMetaRow: {
     flexDirection: "row",
@@ -889,7 +933,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   restaurantMetaText: {
-    fontSize: 14,
+    fontSize: 12,
     color: "#6B7280",
   },
   restaurantMetaDot: {
@@ -926,21 +970,21 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   addressLine: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "700",
     color: "#111827",
-    lineHeight: 22,
+    lineHeight: 20,
   },
   notificationTitle: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "700",
     color: "#111827",
-    marginBottom: 4,
+    marginBottom: 2,
   },
   notificationDesc: {
-    fontSize: 14,
+    fontSize: 12,
     color: "#6B7280",
-    lineHeight: 20,
+    lineHeight: 18,
   },
   notificationBell: {
     width: 44,

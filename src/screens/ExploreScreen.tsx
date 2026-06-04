@@ -415,7 +415,7 @@ export function ExploreScreen() {
       <ScrollView
         style={{ flex: 1 }}
         contentContainerStyle={{
-          paddingBottom: insets.bottom + 100,
+          paddingBottom: insets.bottom + 20,
           backgroundColor: '#fff'
         }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[BrandColors.primary]} />}
@@ -558,7 +558,7 @@ export function ExploreScreen() {
                   {popularMenuItems.map((dish) => (
                     <TouchableOpacity key={dish.id} style={styles.modernDishCard} onPress={() => { setSelectedProduct(dish); setIsProductModalVisible(true); }}>
                       <View style={styles.dishImageBg}>
-                        <Image source={{ uri: dish.image || '' }} style={styles.dishImage} resizeMode="contain" />
+                        <Image source={{ uri: dish.image || 'https://via.placeholder.com/150' }} style={styles.dishImage} resizeMode="contain" />
                         <QuantitySelector
                           initialQuantity={cartItems.find(item => item.id === dish.id)?.quantity || 0}
                           onUpdate={(newQty) => handleModalAddToCart(dish, newQty)}
@@ -610,7 +610,7 @@ export function ExploreScreen() {
               ) : nearbyRestaurants.length > 0 ? (
                 nearbyRestaurants.map((restaurant) => (
                   <TouchableOpacity key={restaurant.id} style={styles.restaurantCard} onPress={() => navigation.navigate("RestaurantDetails", { restaurant })} activeOpacity={1}>
-                    <Image source={{ uri: restaurant.coverImage || '' }} style={styles.restaurantImage} defaultSource={require('../../assets/placeholder.png')} />
+                    <Image source={{ uri: restaurant.coverImage || 'https://via.placeholder.com/350x200' }} style={styles.restaurantImage} defaultSource={require('../../assets/placeholder.png')} />
                     <View style={styles.restaurantInfo}>
                       <View style={styles.restaurantHeader}>
                         <View style={{ flex: 1 }}>
@@ -720,7 +720,7 @@ export function ExploreScreen() {
                     </View>
                     {searchRestaurantsResults.filter(matchesStoreType).map((restaurant) => (
                       <TouchableOpacity key={restaurant.id} style={styles.restaurantCard} onPress={() => handleSearchResultSelect('restaurant', restaurant)} activeOpacity={1}>
-                        <Image source={{ uri: restaurant.coverImage || '' }} style={styles.restaurantImage} defaultSource={require('../../assets/placeholder.png')} />
+                        <Image source={{ uri: restaurant.coverImage || 'https://via.placeholder.com/350x200' }} style={styles.restaurantImage} defaultSource={require('../../assets/placeholder.png')} />
                         <View style={styles.restaurantInfo}>
                           <View style={styles.restaurantHeader}>
                             <View style={{ flex: 1 }}>
@@ -773,7 +773,7 @@ export function ExploreScreen() {
                         >
                           <View style={styles.dishImageBg}>
                             <Image
-                              source={{ uri: item.image || '' }}
+                              source={{ uri: item.image || 'https://via.placeholder.com/150' }}
                               style={styles.dishImage}
                               resizeMode="contain"
                             />

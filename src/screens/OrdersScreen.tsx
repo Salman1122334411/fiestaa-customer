@@ -525,7 +525,7 @@ export function OrdersScreen({ navigation }: { navigation: any }) {
         data={orders}
         renderItem={renderOrderItem}
         keyExtractor={(item) => item.id}
-        contentContainerStyle={[styles.listContainer, { paddingBottom: 60 + insets.bottom, paddingTop: 20 }]}
+        contentContainerStyle={[styles.listContainer, { paddingBottom: insets.bottom + 20, paddingTop: 20 }]}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}

@@ -82,11 +82,10 @@ export const PhoneNumberInput: React.FC<PhoneNumberInputProps> = ({
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Sync initial value
+  // Sync value when it changes
   useEffect(() => {
     if (value) {
       try {
-        // Try to parse the full international number
         const normalized = value.startsWith('+') ? value : `+${value.replace(/^\+/, '')}`;
         const phoneNumber = parsePhoneNumber(normalized);
         if (phoneNumber && phoneNumber.country) {
@@ -97,25 +96,24 @@ export const PhoneNumberInput: React.FC<PhoneNumberInputProps> = ({
             return;
           }
         }
-        // If parsing succeeded but no country match, fall through to manual fallback
       } catch (e) {
-        // Silently catch and fall through to manual fallback
+        // Fallback to manual matching
       }
 
-      // Fallback to manual matching if parsing fails or country not matched
+      // Fallback matching
       const sortedCountries = [...COUNTRIES].sort((a, b) => b.dialCode.length - a.dialCode.length);
       const matched = sortedCountries.find((c) => value.startsWith(c.dialCode));
-      
       if (matched) {
         setSelectedCountry(matched);
         const national = value.slice(matched.dialCode.length);
         setLocalNumber(new AsYouType(matched.code as CountryCode).input(national));
       } else {
-        // Absolute fallback: just show the value as is
         setLocalNumber(value);
       }
+    } else {
+      setLocalNumber('');
     }
-  }, []);
+  }, [value]);
 
   const handleCountrySelect = (country: (Country & { labelKey: string })) => {
     setSelectedCountry(country);

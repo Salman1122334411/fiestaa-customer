@@ -111,7 +111,7 @@ const getRestaurantStatus = (operatingHours: any, t: any, closedDate?: string, d
   const parseTime = (timeStr: string) => {
     const [h, m] = timeStr.split(':').map(Number);
     return (h || 0) * 60 + (m || 0);
-  };
+  };  
 
   const openMinutes = parseTime(todayHours.open);
   const closeMinutes = parseTime(todayHours.close);
@@ -591,23 +591,29 @@ export const RestaurantDetailsScreen = ({ route, navigation }: { route: any; nav
         }}
         activeOpacity={0.8}
       >
-        <Image
-          source={item.image ? { uri: item.image } : require('../../assets/placeholder.png')}
-          style={styles.productCardImage}
-          resizeMode="cover"
-        />
+        <View style={styles.productCardImageBg}>
+          <Image
+            source={item.image ? { uri: item.image } : require('../../assets/placeholder.png')}
+            style={styles.productCardImage}
+            resizeMode="cover"
+          />
+        </View>
         <View style={styles.productCardDetails}>
-          <Text style={styles.productCardTitle} >{item.label}</Text>
-          {/* <Text style={styles.productCardDescription} numberOfLines={1} ellipsizeMode="tail">{item.description}</Text> */}
+          <Text style={styles.productCardTitle} numberOfLines={1} ellipsizeMode="tail">{item.label}</Text>
           
           <View style={styles.productCardBottomRow}>
-            <Text style={styles.productCardPrice}>{formatPrice(item.price, restaurant.currency)}</Text>
+            <View style={styles.productCardPriceGroup}>
+              <Text style={styles.productCardPrice}>{formatPrice(item.price, restaurant.currency)}</Text>
+              <Text style={styles.productCardRestaurant} numberOfLines={1}>
+                {restaurant?.name || t('orders.restaurant_fallback')}
+              </Text>
+            </View>        
             <TouchableOpacity 
               style={styles.productCardAddButton}
               onPress={onAddPress}
               activeOpacity={0.8}
             >
-              <Ionicons name="add" size={16} color="#fff" fontWeight='bold' />
+              <Ionicons name="add" size={14} color="#6B7280" />
             </TouchableOpacity>
           </View>
         </View>
@@ -652,13 +658,17 @@ export const RestaurantDetailsScreen = ({ route, navigation }: { route: any; nav
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
+      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" translucent />
+      <View style={[styles.fixedTopSafeArea, { height: insets.top }]} />
       <FlatList
         ref={flatListRef}
         data={flatListData}
         renderItem={renderItem}
         keyExtractor={(item, index) => item.isHeader ? `header-${item.name}-${index}` : `${item.id}-${index}`}
-        contentContainerStyle={{ paddingBottom: insets.bottom + 120 }}
+        style={styles.list}
+        contentContainerStyle={{
+          paddingBottom: cartItems.length > 0 ? insets.bottom + 80 : insets.bottom + 20,
+        }}
         onScrollToIndexFailed={(info) => {
           const wait = new Promise(resolve => setTimeout(resolve, 500));
           wait.then(() => {

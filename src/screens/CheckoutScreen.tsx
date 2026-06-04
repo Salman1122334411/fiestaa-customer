@@ -8,7 +8,9 @@ import {
   ActivityIndicator,
   Image,
   TextInput,
+  Dimensions,
 } from 'react-native';
+import { WebView } from 'react-native-webview';
 import { styles } from './CheckoutScreen.styles';
 import { useNavigation, RouteProp, useRoute, useFocusEffect } from '@react-navigation/native';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
@@ -17,7 +19,6 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
 import { MapPin, ShoppingBag, Phone, Gift, Receipt, CreditCard } from 'lucide-react-native';
-import MapView from 'react-native-maps';
 import { supabase, getRestaurantById } from '../lib/supabase';
 import { useCart, calculateItemSubtotal, getCartItemKey } from '../hooks/useCart';
 import cuid from 'cuid';
@@ -31,6 +32,10 @@ import { OrderSuccessModal } from '../components/Checkout/OrderSuccessModal';
 import { resolveDeliveryCharge } from '../utils/delivery';
 import Preloader from '../components/Preloader';
 import QuantitySelector from '../components/QuantitySelector';
+
+// No Mapbox/React Native Maps imports - using OpenStreetMap static map
+
+// No Mapbox initialization needed
 
 // Use the same naming convention as in CartScreen
 type Address = {
@@ -60,6 +65,22 @@ export function CheckoutScreen() {
   const navigation = useNavigation<NavigationProp>();
   const route = useRoute<CheckoutScreenRouteProp>();
   const { deliveryAddress } = route.params;
+
+  // Map state
+  const [mapHeight, setMapHeight] = useState(160);
+  const [zoomLevel, setZoomLevel] = useState(15);
+
+  const handleZoomIn = () => {
+    setZoomLevel(prev => Math.min(prev + 1, 19));
+  };
+
+  const handleZoomOut = () => {
+    setZoomLevel(prev => Math.max(prev - 1, 1));
+  };
+
+  const handleHeightChange = (newHeight: number) => {
+    setMapHeight(newHeight);
+  };
 
   console.log("CheckoutScreen mounted");
   console.log("Received deliveryAddress:", deliveryAddress);
@@ -297,14 +318,6 @@ export function CheckoutScreen() {
     return <Preloader fullScreen label={t('checkout.processing')} />;
   }
 
-  // Define a default map region if delivery address has coordinates, otherwise some defaults
-  const mapRegion = {
-    latitude: deliveryAddress?.latitude || 37.78825,
-    longitude: deliveryAddress?.longitude || -122.4324,
-    latitudeDelta: 0.015,
-    longitudeDelta: 0.0121,
-  };
-
   return (
     <View style={styles.container}>
       {/* Custom Orange Header */}
@@ -315,18 +328,52 @@ export function CheckoutScreen() {
         <Text style={styles.headerTitle}>{t('checkout.title', 'Checkout')}</Text>
       </View>
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false} bounces={false}>
-        {/* Decorative Map View */}
-        <View style={styles.mapContainer}>
-          <MapView
-            style={styles.map}
-            initialRegion={mapRegion}
-            scrollEnabled={false}
-            zoomEnabled={false}
-            pitchEnabled={false}
-            rotateEnabled={false}
-          />
-        </View>
+        <ScrollView style={styles.content} showsVerticalScrollIndicator={false} bounces={false}>
+          {/* Interactive OpenStreetMap showing delivery location */}
+          <View style={[styles.mapContainer, { height: mapHeight }]}>
+            <WebView
+              key={`map-${zoomLevel}-${mapHeight}`}
+              source={{ 
+                html: `
+                  <!DOCTYPE html>
+                  <html>
+                  <head>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+                    <style>html,body,#map{margin:0;padding:0;width:100%;height:100%;}</style>
+                  </head>
+                  <body>
+                    <div id="map"></div>
+                    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+                    <script>
+                      var map = L.map('map').setView([${deliveryAddress?.latitude ?? 31.5204}, ${deliveryAddress?.longitude ?? 74.3587}], ${zoomLevel});
+                      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                        maxZoom: 19,
+                        attribution: '© OpenStreetMap'
+                      }).addTo(map);
+                      L.marker([${deliveryAddress?.latitude ?? 31.5204}, ${deliveryAddress?.longitude ?? 74.3587}]).addTo(map)
+                        .bindPopup('Delivery Location').openPopup();
+                    </script>
+                  </body>
+                  </html>
+                ` 
+              }}
+              style={styles.map}
+              scrollEnabled={false}
+              originWhitelist={['*']}
+              javaScriptEnabled
+              domStorageEnabled
+            />
+            {/* Zoom Controls */}
+            <View style={styles.mapControls}>
+              <TouchableOpacity style={styles.zoomButton} onPress={handleZoomIn}>
+                <Ionicons name="add" size={20} color="#333" />
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.zoomButton} onPress={handleZoomOut}>
+                <Ionicons name="remove" size={20} color="#333" />
+              </TouchableOpacity>
+            </View>
+          </View>
 
         <View style={styles.sectionPadding}>
           {/* Delivery Time Header */}

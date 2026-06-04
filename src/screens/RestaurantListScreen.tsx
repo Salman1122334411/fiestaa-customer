@@ -375,7 +375,7 @@ export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
       >
         <View style={styles.imageWrapper}>
           <Image
-            source={{ uri: item.coverImage || (item as any).cover_image || '' }}
+            source={{ uri: item.coverImage || (item as any).cover_image || 'https://via.placeholder.com/350x200' }}
             style={styles.restaurantImage}
           />
           {/* Floating Delivery Time Badge */}
@@ -388,7 +388,7 @@ export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
           <View style={styles.logoWrapper}>
             {item.logo || (item as any).logo ? (
               <Image
-                source={{ uri: item.logo || (item as any).logo || '' }}
+                source={{ uri: item.logo || (item as any).logo || 'https://via.placeholder.com/150' }}
                 style={styles.logoImage}
                 resizeMode="cover"
               />
@@ -404,40 +404,6 @@ export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
             <Text style={styles.restaurantName} numberOfLines={1} ellipsizeMode="tail">
               {item.name}
             </Text>
-          </View>
-
-          {/* Cuisines Row */}
-          <Text style={styles.cuisineRow} numberOfLines={1} ellipsizeMode="tail">
-            {item.cuisineType ? item.cuisineType : 'Pizza • Fast Food • Italian'}
-          </Text>
-
-          {/* Rating Row */}
-          <View style={styles.ratingRow}>
-            <Ionicons name="star" size={15} color="#FFC107" style={{ marginRight: 4 }} />
-            <Text style={styles.ratingText}>
-              {item.rating ? Number(item.rating).toFixed(1) : '5.0'}{' '}
-              <Text style={styles.ratingCount}>({(item as any).reviewsCount || '100+'})</Text>
-            </Text>
-          </View>
-
-          {/* Divider */}
-          <View style={styles.divider} />
-
-          {/* Footer Row */}
-          <View style={styles.footerRow}>
-            <View style={styles.deliveryDetails}>
-              <Ionicons 
-                name="bicycle" 
-                size={18} 
-                color={item.storeType === 'GROCERY' ? '#10B981' : '#EA580C'} 
-              />
-              <Text style={styles.deliveryDetailsText}>
-                {deliveryChargesVal === 0 
-                  ? `Free Delivery  •  ${item.deliveryTime || '30-40'} min` 
-                  : `${currency} ${deliveryChargesVal}  •  ${item.deliveryTime || '30-40'} min`}
-              </Text>
-            </View>
-
             {/* Favorite Button */}
             <TouchableOpacity
               style={styles.favoriteButton}
@@ -453,6 +419,32 @@ export const RestaurantListScreen = ({ navigation }: { navigation: any }) => {
                 color={favorites[item.id] ? '#EF4444' : '#EA580C'}
               />
             </TouchableOpacity>
+          </View>
+
+          {/* Cuisines Row */}
+          <Text style={styles.cuisineRow} numberOfLines={1} ellipsizeMode="tail">
+            {item.cuisineType ? item.cuisineType : 'Pizza • Fast Food • Italian'}
+          </Text>
+
+          {/* Rating & Delivery Row */}
+          <View style={styles.ratingRow}>
+            <Ionicons name="star" size={15} color="#FFC107" style={{ marginRight: 4 }} />
+            <Text style={styles.ratingText}>
+              {item.rating ? Number(item.rating).toFixed(1) : '5.0'}{' '}
+              <Text style={styles.ratingCount}>({(item as any).reviewsCount || '100+'})</Text>
+            </Text>
+            <Text style={{ marginHorizontal: 8, color: '#94A3B8' }}>•</Text>
+            <Ionicons 
+              name="bicycle" 
+              size={15} 
+              color={item.storeType === 'GROCERY' ? '#10B981' : '#EA580C'} 
+              style={{ marginRight: 4 }}
+            />
+            <Text style={{ fontSize: 13, fontWeight: '700', color: '#334155' }}>
+              {deliveryChargesVal === 0 
+                ? 'Free Delivery' 
+                : `${currency} ${deliveryChargesVal}`}
+            </Text>
           </View>
         </View>
       </TouchableOpacity>

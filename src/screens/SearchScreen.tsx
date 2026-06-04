@@ -547,7 +547,6 @@ export const SearchScreen = ({ navigation, route }: { navigation: any, route: an
                           key={`${restaurant.id}-search`}
                           restaurant={restaurant}
                           onPress={() => {
-                            addToRecentSearches(restaurant.name);
                             navigation.navigate("RestaurantDetails", { restaurant });
                           }}
                         />
@@ -575,7 +574,6 @@ export const SearchScreen = ({ navigation, route }: { navigation: any, route: an
                           key={`${item.id}-search`}
                           item={item}
                           onPress={() => {
-                            addToRecentSearches(item.label);
                             setSelectedProduct(item);
                             setIsModalVisible(true);
                           }}
@@ -639,7 +637,7 @@ export const SearchScreen = ({ navigation, route }: { navigation: any, route: an
                             activeOpacity={0.7}
                           >
                             <Ionicons name="time-outline" size={15} color="#9CA3AF" style={{ marginRight: 6 }} />
-                            <Text style={styles.recentSearchText} numberOfLines={1}>{term}</Text>
+                            <Text style={[styles.recentSearchText, { flexShrink: 1 }]} numberOfLines={1}>{term}</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
                             style={styles.removeRecentSearchButton}
@@ -654,13 +652,13 @@ export const SearchScreen = ({ navigation, route }: { navigation: any, route: an
                   </View>
                 )}
 
-                {/* Popular Restaurants Section */}
+                {/* Popular Stores Section */}
                 {popularRestaurants.length > 0 && (
                   <View style={styles.section}>
                     <View style={styles.sectionHeader}>
                       <View style={styles.sectionTitleContainer}>
                         <View style={styles.sectionAccent} />
-                        <Text style={styles.sectionTitle}>Popular Restaurants</Text>
+                        <Text style={styles.sectionTitle}>Popular Stores</Text>
                       </View>
                     </View>
                     <ScrollView
@@ -687,7 +685,7 @@ export const SearchScreen = ({ navigation, route }: { navigation: any, route: an
                     <View style={styles.sectionHeader}>
                       <View style={styles.sectionTitleContainer}>
                         <View style={styles.sectionAccent} />
-                        <Text style={styles.sectionTitle}>Popular Dishes</Text>
+                        <Text style={styles.sectionTitle}>Popular Near You</Text>
                       </View>
                     </View>
                     <ScrollView
@@ -786,7 +784,6 @@ export const SearchScreen = ({ navigation, route }: { navigation: any, route: an
                           key={`${item.id}-${cuisine}`}
                           item={item}
                           onPress={() => {
-                            addToRecentSearches(item.label || cuisine);
                             setSelectedProduct(item);
                             setIsModalVisible(true);
                           }}

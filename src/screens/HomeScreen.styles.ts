@@ -4,9 +4,9 @@ import { Colors as BrandColors } from '../constants/Colors';
 const { width } = Dimensions.get("window");
 
 export const styles = StyleSheet.create({
-  container: {
+    container: {
     flex: 1,
-    backgroundColor: "#FFF7ED", // Root peach color to fill status bar gap
+    backgroundColor: "#FFFFFF", 
   },
   topHeader: {
     paddingHorizontal: 20,
@@ -295,19 +295,19 @@ export const styles = StyleSheet.create({
     transform: [{ rotate: '15deg' }],
   },
   section: {
-    marginTop: 12,
+    marginTop: 24,
     marginBottom: 0,
   },
 
   section_home: {
-    marginTop: 12,
+    marginTop: 24,
   },
 
   sectionHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 0,
+    marginBottom: 12,
     paddingHorizontal: 20,
   },
   sectionTitleContainer: {

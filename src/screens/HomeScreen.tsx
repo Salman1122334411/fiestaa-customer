@@ -367,7 +367,7 @@ export function HomeScreen() {
                     activeOpacity={1}
                   >
                     <Image
-                      source={{ uri: restaurant.coverImage || '' }}
+                      source={{ uri: restaurant.coverImage || 'https://via.placeholder.com/350x200' }}
                       style={styles.restaurantImage}
                       defaultSource={require('../../assets/placeholder.png')}
                     />
@@ -408,7 +408,7 @@ export function HomeScreen() {
                       >
                         <View style={[styles.dishImageBg, { height: 140 }]}>
                           <Image
-                            source={{ uri: item.image || '' }}
+                            source={{ uri: item.image || 'https://via.placeholder.com/150' }}
                             style={styles.dishImage}
                             resizeMode="contain"
                           />
@@ -696,7 +696,6 @@ export function HomeScreen() {
             onRefresh={onRefresh}
             colors={[BrandColors.primary]}
             tintColor={BrandColors.primary}
-            progressViewOffset={HEADER_MAX_HEIGHT}
           />
         }
         style={{ backgroundColor: '#fff' }}
@@ -1030,7 +1029,7 @@ export function HomeScreen() {
                       >
                         <View style={styles.dishImageBg}>
                           <Image
-                            source={{ uri: dish.image || '' }}
+                            source={{ uri: dish.image || 'https://via.placeholder.com/150' }}
                             style={styles.dishImage}
                             resizeMode="contain"
                             defaultSource={require('../../assets/placeholder.png')}
@@ -1068,7 +1067,6 @@ export function HomeScreen() {
                             <Text style={styles.dishPrice}>
                               {formatPrice(dish.price || 0, dish.Restaurant?.currency || dish.restaurantCurrency)}
                             </Text>
-
                           </View>
                           <View style={{ flexDirection: "row", gap: 4, alignItems: "center", justifyContent: 'space-between' }}>
                             <Text style={[styles.dishRestaurantName, { flex: 1 }]} numberOfLines={1}>
@@ -1079,14 +1077,6 @@ export function HomeScreen() {
                               <Text style={styles.dishRatingText}>5.0</Text>
                             </View>
                           </View>
-
-                          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2, gap: 4 }}>
-                            <Ionicons name="time-outline" size={12} color="#6B7280" />
-                            <Text style={{ fontSize: 11, color: '#6B7280', fontWeight: '500' }}>
-                              {dish.Restaurant?.deliveryTime || t('common.delivery_time_range_default')} {t('common.min')}
-                            </Text>
-                          </View>
-
 
                         </View>
                       </TouchableOpacity>
@@ -1131,7 +1121,7 @@ export function HomeScreen() {
                     activeOpacity={1}
                   >
                     <Image
-                      source={{ uri: restaurant.coverImage || '' }}
+                      source={{ uri: restaurant.coverImage || 'https://via.placeholder.com/350x200' }}
                       style={styles.restaurantImage}
                       defaultSource={require('../../assets/placeholder.png')}
                     />
